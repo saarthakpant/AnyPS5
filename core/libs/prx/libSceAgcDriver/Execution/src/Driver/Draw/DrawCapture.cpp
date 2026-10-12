@@ -5,8 +5,11 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 
 namespace AgcDriver::DriverDetail {
 
@@ -29,9 +32,27 @@ ShaderRecompiler::RecompileResult Driver::materializeDrawStage(std::size_t i, st
     auto& stageCapture = stageCaptures[i];
     stageCapture.forgetSerial = GuestMemory::ForgetSerial();
     stageCapture.pushOffset = pushOffset;
+    // APS5_DUMP_FAILED_SHADERS=1 writes the request of a draw program whose resources fail to
+    // resolve (shader_<address>.req with the memory read so far, as APS5_DUMP_SHADERS writes every
+    // compute request), and the error names the program either way.
+    const auto failed = [&](const std::exception& error) {
+        static const bool dumpFailed = std::getenv("APS5_DUMP_FAILED_SHADERS") != nullptr;
+        std::string dump;
+        if (dumpFailed) {
+            request.context.memory = shaderMemory.Regions();
+            dump = dumpRequest(program.binary.codeAddress, request);
+        }
+        char where[128];
+        std::snprintf(where, sizeof(where), "draw shader 0x%llx stage %u%s%s%s: ", static_cast<unsigned long long>(program.binary.codeAddress), static_cast<unsigned>(request.shader.stage), dump.empty() ? "" : " (", dump.c_str(), dump.empty() ? "" : ")");
+        return std::runtime_error(where + std::string(error.what()));
+    };
     const auto capture = [&] {
         const SampledReadScope sampling(evidenceReads);
-        return shaderMemory.Capture(invocation);
+        try {
+            return shaderMemory.Capture(invocation);
+        } catch (const std::exception& error) {
+            throw failed(error);
+        }
     }();
 
     stageCapture.regions = shaderMemory.TakeRecentRegions();
@@ -75,7 +96,11 @@ ShaderRecompiler::RecompileResult Driver::materializeDrawStage(std::size_t i, st
     phaseTiming.Phase(DrawRowCapture);
 
     timing.Mark("capture_resources");
-    stageCapture.compiled = invocation.Materialize(*capture);
+    try {
+        stageCapture.compiled = invocation.Materialize(*capture);
+    } catch (const std::exception& error) {
+        throw failed(error);
+    }
     timing.Mark("materialize");
     ShaderRecompiler::RecompileResult result = *stageCapture.compiled;
     phaseTiming.Phase(DrawRowRecompile);

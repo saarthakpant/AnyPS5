@@ -286,6 +286,9 @@ void Driver::execute(const Submission& submission) {
                 } catch (const std::exception& error) {
                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
                     countSkip(Graphics::DrawSkip::Thrown);
+                    // The draw's programs (SPI_SHADER_PGM_LO/HI of PS, GS, ES, HS), which the error itself does not name.
+                    const auto program = [&](std::uint32_t lo) { return (static_cast<std::uint64_t>(readUserData(queue.shader, lo + 1u) & 0xffu) << 40u) | (static_cast<std::uint64_t>(readUserData(queue.shader, lo)) << 8u); };
+                    std::fprintf(stderr, "[gpu] draw failed: target 0x%llx PS 0x%llx GS 0x%llx ES 0x%llx HS 0x%llx (submission %llu, DWORD %zu)\n", static_cast<unsigned long long>(color), static_cast<unsigned long long>(program(0x8u)), static_cast<unsigned long long>(program(0x88u)), static_cast<unsigned long long>(program(0xc8u)), static_cast<unsigned long long>(program(0x108u)), static_cast<unsigned long long>(submission.serial), cursor);
                     throw;
                 }
             });
