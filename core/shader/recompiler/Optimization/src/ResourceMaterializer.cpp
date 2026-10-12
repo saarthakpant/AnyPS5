@@ -63,6 +63,17 @@ bool nullImageDescriptor(const DescriptorValue& descriptor) {
     return descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u;
 }
 
+// A slot whose words are not of the descriptor's kind (a T# whose TYPE is no image type, a V# whose
+// TYPE is not 0) holds words the title left there, as shaders keep unrelated words in slots the
+// draw does not need. It reads as a null descriptor, as the texture unit returns 0 for a resource
+// it cannot use (not measured); the first one of each kind is logged with its words.
+void reportForeignDescriptor(const char* kind, std::uint32_t index, const DescriptorValue& descriptor) {
+    static std::atomic<bool> reported[2]{};
+    const bool image = kind[0] == 'T';
+    if (reported[image ? 1 : 0].exchange(true)) return;
+    std::fprintf(stderr, "[shader] %s %u holds no %s and is read as null (%08x %08x %08x %08x %08x %08x %08x %08x)\n", kind, index, image ? "image descriptor" : "buffer descriptor", descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4], descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
+}
+
 ImageType rawImageType(const DescriptorValue& descriptor) {
     return static_cast<ImageType>((descriptor.dwords[3] >> 28u) & 0xfu);
 }
@@ -492,6 +503,10 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
             descriptor = DescriptorValue{};
             descriptor.dwordCount = 8u;
         }
+        if (!validImageDescriptor(descriptor, image.r128) && !nullImageDescriptor(descriptor) && rawImageType(descriptor) < ImageType::Color1D) {
+            reportForeignDescriptor("T#", i, descriptor);
+            descriptor.dwords = {};
+        }
         if (!validImageDescriptor(descriptor, image.r128) && !nullImageDescriptor(descriptor)) {
             char text[192];
             std::snprintf(text, sizeof(text), "runtime image descriptor is invalid (image %u%s, T# %08x %08x %08x %08x %08x %08x %08x %08x)", i, image.r128 ? ", r128" : "", descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4], descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
@@ -588,7 +603,12 @@ std::uint32_t emulatedCompareState(const ShaderInfo& info, const ResourceSnapsho
 
 void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot, const std::vector<TableResolution>& tables) {
     for (std::uint32_t i = 0u; i < plan.info.buffers.size(); ++i) {
-        const auto decoded = decodeBufferDescriptor(snapshot.buffers.at(i));
+        auto& buffer = snapshot.buffers.at(i);
+        if (decodeBufferDescriptor(buffer).Type() != 0u) {
+            reportForeignDescriptor("V#", i, buffer);
+            buffer.dwords = {};
+        }
+        const auto decoded = decodeBufferDescriptor(buffer);
         if (decoded.Type() != 0u) {
             char text[160];
             std::snprintf(text, sizeof(text), "buffer descriptor uses an unsupported type (buffer %u, V# %08x %08x %08x %08x)", i, decoded.fields[0], decoded.fields[1], decoded.fields[2], decoded.fields[3]);
