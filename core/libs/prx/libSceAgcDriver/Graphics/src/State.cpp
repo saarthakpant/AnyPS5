@@ -119,9 +119,10 @@ constexpr std::uint32_t ClipControlMask = ~(0x80000u | 0x01000000u | 0x0c000000u
 
 // PA_CL_VS_OUT_CNTL USE_VTX_RENDER_TARGET_INDX with VS_OUT_MISC_VEC_ENA: the last vertex stage
 // exports a render target index in the misc position vector, which the hardware adds to each color
-// view's SLICE_START and clamps to its SLICE_MAX. Views of one slice keep every primitive on it, so
-// the export is not routed; views of several become attachments of that many layers, and the
-// shader clamps the index below them.
+// view's SLICE_START and clamps to its SLICE_MAX. A SLICE_MAX past the surface's last slice is
+// taken as that slice (Ghostrunner 2 sets SLICE_MAX 64 on a 64-slice volume). Views of one slice
+// keep every primitive on it, so the export is not routed; views of several become attachments of
+// that many layers, and the shader clamps the index below them.
 void decodeLayers(const Registers& cx, State& result) {
     const auto control = read(cx, 0x207);
     if ((control & ViewportIndexExport) != 0) {
@@ -132,6 +133,17 @@ void decodeLayers(const Registers& cx, State& result) {
         }
     }
     if ((control & (RenderTargetIndexExport | MiscVectorExport)) != (RenderTargetIndexExport | MiscVectorExport)) return;
+    for (auto& color : result.colors) {
+        Require(color.lastSlice >= color.firstSlice, "the color view's SLICE_MAX precedes its SLICE_START");
+        const auto surfaceLast = color.depth > 1 ? color.depth - 1u : color.arrayLastSlice;
+        if (color.lastSlice <= surfaceLast) continue;
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::fprintf(stderr, "[gpu] a layered draw's color view reaches beyond the slices of its surface; its layers stop at the surface's last slice (MRT%u slices %u..%u of a %s with last slice %u, CB_COLOR_VIEW 0x%08x)\n", color.slot, color.firstSlice, color.lastSlice, color.depth > 1 ? "3D surface" : "2D surface", surfaceLast, read(cx, 0x31b + color.slot * 0xfu));
+        }
+        color.lastSlice = surfaceLast;
+    }
     if (std::none_of(result.colors.begin(), result.colors.end(), [](const ColorTarget& color) { return color.lastSlice != color.firstSlice; })) {
         if (const auto view = result.depth ? read(cx, 0x002) : 0u; ((view >> 13u) & 0x7ffu) > (view & 0x7ffu)) {
             static bool reported = false;
@@ -144,13 +156,6 @@ void decodeLayers(const Registers& cx, State& result) {
     }
     std::uint32_t layers = 0;
     for (auto& color : result.colors) {
-        const auto surfaceLast = color.depth > 1 ? color.depth - 1u : color.arrayLastSlice;
-        Require(color.lastSlice >= color.firstSlice, "the color view's SLICE_MAX precedes its SLICE_START");
-        if (color.lastSlice > surfaceLast) {
-            char message[256];
-            std::snprintf(message, sizeof(message), "AGC graphics: a layered draw's color view reaches beyond the slices of its surface (MRT%u slices %u..%u of a %s with last slice %u, CB_COLOR_VIEW 0x%08x)", color.slot, color.firstSlice, color.lastSlice, color.depth > 1 ? "3D surface" : "2D array", surfaceLast, read(cx, 0x31b + color.slot * 0xfu));
-            throw std::runtime_error(message);
-        }
         Require(color.samples == 1, "layered multisampled color targets are unsupported");
         color.layers = color.lastSlice - color.firstSlice + 1u;
         Require(layers == 0 || color.layers == layers, "layered draws into color views of different slice counts are unsupported");

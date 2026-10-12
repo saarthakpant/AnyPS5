@@ -1305,8 +1305,11 @@ void DepthStencilTests() {
     queue.context[0x31b] = 1u << 13u;
     const auto unlayered = AgcDriver::Graphics::DecodeState(queue);
     Require(unlayered.layers == 1u && unlayered.positionExports == 0u && unlayered.color.layers == 1u && unlayered.color.firstSlice == 0u && unlayered.color.lastSlice == 1u, "a multi-slice color view without a render target index export is not a single-layer draw");
+    // A SLICE_MAX past the surface's last slice stops at that slice: a single-slice surface keeps a
+    // render target index export off its one slice.
     queue.context[0x207] = 0x01240000u;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beyond the slices of its surface");
+    const auto pastSingle = AgcDriver::Graphics::DecodeState(queue);
+    Require(pastSingle.layers == 1u && pastSingle.positionExports == 0u && pastSingle.color.layers == 1u && pastSingle.color.lastSlice == 0u, "a layered draw whose color view reaches past a one-slice surface was not clamped to that slice");
     queue.context[0x207] = 0;
     const auto sliced = reinterpret_cast<std::uintptr_t>(sliceMemory.data());
     queue.context[0x318] = static_cast<std::uint32_t>(sliced >> 8u);
@@ -1340,12 +1343,27 @@ void DepthStencilTests() {
     Require(oneSlice.layers == 1u && oneSlice.positionExports == 0u && oneSlice.color.depthSlice == 2u, "a render target index export into a one-slice view was routed");
     queue.context[0x31b] = 2u | (1u << 13u);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "SLICE_MAX precedes");
+    // SLICE_MAX one past the last slice, as Ghostrunner 2 sets it (64 on a 64-slice volume), attaches
+    // the slices up to the surface's last.
+    queue.context[0x31b] = 4u << 13u;
+    const auto pastVolume = AgcDriver::Graphics::DecodeState(queue);
+    Require(pastVolume.layers == 4u && pastVolume.positionExports == 0x00240000u && pastVolume.color.layers == 4u && pastVolume.color.lastSlice == 3u && pastVolume.color.depthSlice == 0u, "a layered draw whose color view reaches past a 3D target did not attach its four slices");
     queue.context[0x31b] = 1u | (4u << 13u);
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beyond the slices of its surface");
+    const auto pastRange = AgcDriver::Graphics::DecodeState(queue);
+    Require(pastRange.layers == 3u && pastRange.color.layers == 3u && pastRange.color.depthSlice == 1u, "a layered draw from slice 1 past a 3D target did not attach slices 1..3");
+    queue.context[0x31b] = 3u | (4u << 13u);
+    const auto pastLast = AgcDriver::Graphics::DecodeState(queue);
+    Require(pastLast.layers == 1u && pastLast.positionExports == 0u && pastLast.color.depthSlice == 3u, "a layered draw from the last slice past a 3D target was routed");
+    queue.context[0x31b] = 4u | (4u << 13u);
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beyond the 3D surface");
     queue.context[0x3b8] = 0x09000001;
     queue.context[0x31b] = 1u << 13u;
     const auto layeredArray = AgcDriver::Graphics::DecodeState(queue);
     Require(layeredArray.layers == 2u && layeredArray.color.layers == 2u && layeredArray.color.arraySlice == 0u && layeredArray.color.arrayLastSlice == 1u && layeredArray.color.address == sliced, "a layered draw into both slices of a 2D array target did not attach two layers");
+    queue.context[0x31b] = 5u << 13u;
+    const auto pastArray = AgcDriver::Graphics::DecodeState(queue);
+    Require(pastArray.layers == 2u && pastArray.color.layers == 2u && pastArray.color.lastSlice == 1u && pastArray.color.address == sliced, "a layered draw whose color view reaches past a 2D array target did not attach its two slices");
+    queue.context[0x31b] = 1u << 13u;
     queue.context[0x207] = 0x012c0000u;
     const auto viewportIgnored = AgcDriver::Graphics::DecodeState(queue);
     Require(viewportIgnored.layers == 2u && viewportIgnored.positionExports == 0x00240000u, "a viewport index export changed the routed render target index exports");
