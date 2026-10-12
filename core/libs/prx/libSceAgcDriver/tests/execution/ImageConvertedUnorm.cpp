@@ -43,7 +43,6 @@ constexpr std::uint32_t SwizzleX011 = 0x244u;
 constexpr std::uint32_t SwizzleYXZ1 = 0x3a5u;
 constexpr std::uint32_t SwizzleXYZW = 0xfacu;
 constexpr std::uint32_t D16 = 0x80000000u;
-constexpr std::uint32_t DivisionUlps = 3;
 constexpr std::size_t BlockBytes = 65536;
 constexpr std::size_t RoundTripOffset = 16384;
 constexpr std::size_t StoreOffset = 32768;
@@ -157,19 +156,14 @@ std::uint32_t Field(std::uint32_t texel, std::uint32_t component) {
     return component == 2u ? texel >> 22u : (texel >> (component * 11u)) & 2047u;
 }
 
-struct Expected {
-    std::uint32_t bits;
-    std::uint32_t ulps;
-};
-
-Expected Selected(std::uint32_t texel, std::uint32_t swizzle, std::uint32_t component, bool unorm) {
+std::uint32_t Selected(std::uint32_t texel, std::uint32_t swizzle, std::uint32_t component, bool unorm) {
     const auto selector = (swizzle >> (component * 3u)) & 7u;
-    if (selector == 0u) return {0u, 0u};
-    if (selector == 1u) return {unorm ? 0x3f800000u : 1u, 0u};
+    if (selector == 0u) return 0u;
+    if (selector == 1u) return unorm ? 0x3f800000u : 1u;
     const auto field = Field(texel, selector - 4u);
     const auto maximum = selector == 6u ? 1023u : 2047u;
-    if (!unorm) return {field, 0u};
-    return {std::bit_cast<std::uint32_t>(static_cast<float>(static_cast<double>(field) / maximum)), field == 0u || field == maximum ? 0u : DivisionUlps};
+    if (!unorm) return field;
+    return std::bit_cast<std::uint32_t>(static_cast<float>(static_cast<double>(field) / maximum));
 }
 
 std::uint32_t StoreField(std::uint32_t bits, std::uint32_t maximum) {
@@ -209,8 +203,7 @@ void CheckLoad(AgcDriver::VulkanDevice& device, const std::uint8_t* texels, std:
             if (((dmask >> component) & 1u) == 0u) continue;
             const auto expected = Selected(LoadTexel(index), swizzle, component, format == UnormFormat);
             const auto actual = Output[index * 4u + slot++];
-            const auto distance = actual > expected.bits ? actual - expected.bits : expected.bits - actual;
-            Require(distance <= expected.ulps, what + ": texel " + std::to_string(index) + " component " + std::to_string(component) + " is " + Hex(actual) + ", expected " + Hex(expected.bits) + " within " + std::to_string(expected.ulps) + " ULP");
+            Require(actual == expected, what + ": texel " + std::to_string(index) + " component " + std::to_string(component) + " is " + Hex(actual) + ", expected " + Hex(expected));
         }
     }
 }
