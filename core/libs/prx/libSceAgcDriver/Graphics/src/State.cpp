@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
@@ -145,7 +146,11 @@ void decodeLayers(const Registers& cx, State& result) {
     for (auto& color : result.colors) {
         const auto surfaceLast = color.depth > 1 ? color.depth - 1u : color.arrayLastSlice;
         Require(color.lastSlice >= color.firstSlice, "the color view's SLICE_MAX precedes its SLICE_START");
-        Require(color.lastSlice <= surfaceLast, "a layered draw's color view reaches beyond the slices of its surface");
+        if (color.lastSlice > surfaceLast) {
+            char message[256];
+            std::snprintf(message, sizeof(message), "AGC graphics: a layered draw's color view reaches beyond the slices of its surface (MRT%u slices %u..%u of a %s with last slice %u, CB_COLOR_VIEW 0x%08x)", color.slot, color.firstSlice, color.lastSlice, color.depth > 1 ? "3D surface" : "2D array", surfaceLast, read(cx, 0x31b + color.slot * 0xfu));
+            throw std::runtime_error(message);
+        }
         Require(color.samples == 1, "layered multisampled color targets are unsupported");
         color.layers = color.lastSlice - color.firstSlice + 1u;
         Require(layers == 0 || color.layers == layers, "layered draws into color views of different slice counts are unsupported");
@@ -1012,6 +1017,26 @@ std::uint32_t ColorWriteMask(const Registers& context) {
     return mask;
 }
 
+namespace {
+
+// The guest bytes of every depth slice of a single-mip 3D color target, laid out as the resident 3D
+// image of its surface (Draw.cpp SurfaceForTarget) describes them.
+std::size_t volumeBytes(const ColorTarget& color) {
+    const auto guestFormat = FindGuestColorTargetFormat(color.format, color.elementBytes);
+    Require(guestFormat.has_value(), "no guest texture format matches the 3D color target's format");
+    GuestTextureResource surface{};
+    surface.width = color.extent.width;
+    surface.height = color.extent.height;
+    surface.depthOrLastArray = color.depth - 1u;
+    surface.mipCount = 1;
+    surface.tileMode = ColorTextureTileMode(color.tileMode);
+    surface.dimension = TextureDimension::k3D;
+    surface.format = *guestFormat;
+    return static_cast<std::size_t>(DescribeSurface(surface).guestBytes);
+}
+
+}
+
 ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     const auto stride = slot * 0xfu;
     ColorTarget color{};
@@ -1049,7 +1074,6 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     if (volume) {
         color.depth = (attrib3 & 0x1fffu) + 1u;
         Require(maxMip == 0, "mipmapped 3D color targets are unsupported");
-        Require((info & 0x10000000u) == 0, "DCC 3D color targets are unsupported");
         Require(slice < color.depth, "the color view slice is beyond the 3D surface");
         color.depthSlice = slice;
     } else if ((attrib3 & 0x1fffu) != 0) {
@@ -1082,9 +1106,12 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     color.arrayAddress = color.arrayLastSlice != 0 ? color.surfaceAddress : 0;
     if (slice != 0 && !volume) color.surfaceAddress += slice * ComputeSurfaceSize(ComputeElementMipLayout(ColorTextureTileMode(color.tileMode), color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount), 1);
     color.address = color.surfaceAddress + mipOffset;
-    color.bytes = colorLayout.Bytes();
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(color.address), color.bytes, colorLayout.Alignment(), true);
     color.format = decoded.format;
+    // A 3D target is its whole volume, every depth slice as its resident 3D image lays them out:
+    // the view's slice (or a layered draw's slices) is a subresource of that image, and the DCC keys
+    // of the surface (one per 256 bytes, read and stored as one uniform range) cover all of them.
+    color.bytes = volume ? volumeBytes(color) : colorLayout.Bytes();
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(color.address), color.bytes, colorLayout.Alignment(), true);
     color.componentMapping = decoded.componentMapping;
     color.packing = decoded.packing;
     Require(color.packing == ShaderRecompiler::ColorExportPacking::None || (info & 0x10000000u) == 0, "DCC-compressed 10_11_11 unorm color targets are unsupported");

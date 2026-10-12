@@ -151,12 +151,25 @@ void storeClearTexels(const Context& context, const ColorTarget& color, const st
 
 void storeSingleTexels(const Context& context, const ColorTarget& color) {
     Require(color.tileMode != ColorTileMode::Linear, "comp-to-single DCC keys of a linear color target");
-    const ColorTargetLayout surface(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.pipeBankXor);
-    Require(surface.Bytes() == color.bytes, "comp-to-single DCC keys over a color target whose layout differs from its surface");
+    constexpr std::size_t BlockBytes = 256;
     StorageTexture::FlushPending(color.address, color.bytes, nullptr, "comp-to-single expansion");
     std::vector<std::byte> texels(color.bytes);
+    if (color.depth > 1) {
+        // A 3D target's elements are spread over its slices by the swizzle (thin or thick), but a
+        // 256-byte block is contiguous in either: every element of a block takes the block's first,
+        // the padding past the volume's edges included (nothing reads it).
+        GuestMemory::Read(color.address, texels, BlockBytes);
+        for (std::size_t offset = 0; offset + color.elementBytes <= texels.size(); offset += color.elementBytes) {
+            const auto first = offset / BlockBytes * BlockBytes;
+            if (offset != first) std::memcpy(texels.data() + offset, texels.data() + first, color.elementBytes);
+        }
+        GuestMemory::Write(color.address, texels, BlockBytes);
+        MarkDccUncompressed(context, color.dccAddress, color.bytes, colorKeyCount(color, color.bytes));
+        return;
+    }
+    const ColorTargetLayout surface(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.pipeBankXor);
+    Require(surface.Bytes() == color.bytes, "comp-to-single DCC keys over a color target whose layout differs from its surface");
     GuestMemory::Read(color.address, texels, surface.Alignment());
-    constexpr std::size_t BlockBytes = 256;
     for (std::uint32_t y = 0; y < color.extent.height; ++y) {
         for (std::uint32_t x = 0; x < color.extent.width; ++x) {
             const auto offset = surface.Offset(x, y);
@@ -1959,7 +1972,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                 }
                 auto resident = CachedStorageSurface(context, SurfaceForTarget(color));
                 Require(resident->Attachable(), "storage format cannot be a color attachment");
-                Require(color.mipCount > 1 || color.depth > 1 || resident->GuestBytes() == colorLayout.Bytes(), "resident image layout differs from the color layout");
+                // A 3D target's bytes are its whole volume (DecodeColorBuffer), which its DCC keys cover.
+                Require(color.mipCount > 1 || resident->GuestBytes() == color.bytes, "resident image layout differs from the color layout");
                 return resident;
             });
         }

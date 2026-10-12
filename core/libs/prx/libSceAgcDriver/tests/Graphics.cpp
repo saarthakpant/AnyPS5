@@ -49,7 +49,7 @@ namespace {
 using AgcDriver::Graphics::Require;
 
 alignas(256) std::array<std::byte, 1024> colorMemory{};
-alignas(256) std::array<std::byte, 2048> sliceMemory{};
+alignas(256) std::array<std::byte, 4096> sliceMemory{};
 
 AgcDriver::QueueState makeState() {
     AgcDriver::QueueState queue;
@@ -1323,6 +1323,7 @@ void DepthStencilTests() {
     queue.context[0x31b] = 2u | (2u << 13u);
     const auto volume = AgcDriver::Graphics::DecodeState(queue);
     Require(volume.color.address == sliced && volume.color.depth == 4u && volume.color.depthSlice == 2u, "a color view of one 3D depth slice did not keep the surface address and select the slice");
+    Require(volume.color.bytes == 4u * 1024u, "a 3D color target's bytes are not its whole volume");
     queue.context[0x31b] = 4u | (4u << 13u);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beyond the 3D surface");
     // Layered draws (PA_CL_VS_OUT_CNTL USE_VTX_RENDER_TARGET_INDX, VS_OUT_MISC_VEC_ENA and
@@ -1352,7 +1353,11 @@ void DepthStencilTests() {
     queue.context[0x3b8] = 0x0a000003;
     queue.context[0x31b] = 0;
     queue.context[0x31c] |= 0x10000000;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "DCC 3D color targets");
+    const auto volumeKeys = reinterpret_cast<std::uintptr_t>(colorMemory.data());
+    queue.context[0x325] = static_cast<std::uint32_t>(volumeKeys >> 8u);
+    queue.context[0x3a8] = static_cast<std::uint32_t>(volumeKeys >> 40u);
+    const auto compressedVolume = AgcDriver::Graphics::DecodeState(queue);
+    Require(compressedVolume.color.dccAddress == volumeKeys && compressedVolume.color.depth == 4u && compressedVolume.color.bytes == 4u * 1024u && compressedVolume.color.address == sliced, "a DCC 3D color target did not decode with its keys over the whole volume");
 }
 
 void OneDimensionalColorTests() {
@@ -1734,6 +1739,59 @@ void metadataPassTests() {
         const auto stored = static_cast<std::size_t>(std::count(tiledKeys, tiledKeys + keyCount, std::uint8_t{0xff}));
         Require(expanded && stored == expected, "a DCC decompress of comp-to-single keys over a 128x128 SW_64KB_R_X target with " + alignment + " DCC did not give every 8x8 block its first texel (" + std::to_string(stored) + " of " + std::to_string(keyCount) + " keys uncompressed, expected " + std::to_string(expected) + ")");
     }
+
+    // A DCC 3D target (four 128x128 slices of thin SW_64KB_R_X, as a layered draw renders them):
+    // its keys are one per 256 bytes of the whole volume, pipe-aligned or not, and a metadata pass
+    // through a view of one slice eliminates the fast clear (or expands comp-to-single blocks) in
+    // every slice, since uniform keys read the same from any of them.
+    constexpr std::uint32_t volumeDepth = 4;
+    constexpr std::size_t volumeBytes = tiledBytes * volumeDepth;
+    constexpr std::size_t volumeKeyCount = volumeBytes / 256;
+    std::vector<std::byte> volumeBlock(blockAlignment + volumeBytes + volumeKeyCount);
+    const auto volumeAddress = (reinterpret_cast<std::uintptr_t>(volumeBlock.data()) + blockAlignment - 1) / blockAlignment * blockAlignment;
+    auto* volumeTexels = reinterpret_cast<std::uint8_t*>(volumeAddress);
+    auto* volumeKeys = volumeTexels + volumeBytes;
+    auto volume = queue;
+    volume.context[0x3b8] = (1u << 27u) | (2u << 24u) | (static_cast<std::uint32_t>(AgcDriver::Graphics::ColorTileMode::RenderTarget) << 14u) | (1u << 30u) | (volumeDepth - 1u);
+    volume.context[0x3b0] = ((tiledSide - 1u) << 14u) | (tiledSide - 1u);
+    volume.context[0x31b] = 2u | (2u << 13u);
+    volume.context[0x318] = static_cast<std::uint32_t>(volumeAddress >> 8u);
+    volume.context[0x390] = static_cast<std::uint32_t>(volumeAddress >> 40u);
+    volume.context[0x325] = static_cast<std::uint32_t>((volumeAddress + volumeBytes) >> 8u);
+    volume.context[0x3a8] = static_cast<std::uint32_t>((volumeAddress + volumeBytes) >> 40u);
+    for (const auto offset : {0xdu, 0x82u, 0x91u, 0x95u}) volume.context[offset] = (tiledSide << 16u) | tiledSide;
+    volume.context[0x10f] = std::bit_cast<std::uint32_t>(64.0f);
+    volume.context[0x110] = std::bit_cast<std::uint32_t>(64.0f);
+    volume.context[0x111] = std::bit_cast<std::uint32_t>(-64.0f);
+    volume.context[0x112] = std::bit_cast<std::uint32_t>(64.0f);
+    const auto volumePass = DecodeColorMetadataPass(volume);
+    Require(volumePass.has_value() && volumePass->targets.size() == 1 && volumePass->targets[0].depth == volumeDepth && volumePass->targets[0].depthSlice == 2u && volumePass->targets[0].address == volumeAddress && volumePass->targets[0].bytes == volumeBytes && volumePass->targets[0].dccAddress == volumeAddress + volumeBytes, "the DCC 3D metadata pass target is not its whole volume");
+    const auto volumeKeysAre = [&](std::uint8_t key) { return std::all_of(volumeKeys, volumeKeys + volumeKeyCount, [&](std::uint8_t value) { return value == key; }); };
+    for (const auto& [key, texel, code] : {std::tuple{std::uint8_t{0x20}, 0x11223344u, "register"}, std::tuple{std::uint8_t{0xc0}, 0xffffffffu, "1111"}}) {
+        std::memset(volumeTexels, 0x5a, volumeBytes);
+        std::memset(volumeKeys, key, volumeKeyCount);
+        AgcDriver::Graphics::RunColorMetadataPass(context, *volumePass);
+        bool filled = true;
+        for (std::size_t offset = 0; offset < volumeBytes; offset += 4) filled = filled && std::memcmp(volumeTexels + offset, &texel, 4) == 0;
+        Require(filled && volumeKeysAre(0xff), std::string("a ") + code + " fast clear eliminate of a DCC 3D target did not fill every slice and store uncompressed keys over the volume");
+    }
+    std::memset(volumeTexels, 0x5a, volumeBytes);
+    std::memset(volumeKeys, 0x20, volumeKeyCount);
+    volumeKeys[volumeKeyCount - 1] = 0xff;
+    expectFailure([&] { AgcDriver::Graphics::RunColorMetadataPass(context, *volumePass); }, "per-block metadata");
+    Require(volumeTexels[volumeBytes - 1] == 0x5a, "a refused pass over a DCC 3D target whose last slice's keys differ changed its texels");
+    std::vector<std::uint32_t> volumeOriginal(volumeBytes / 4);
+    for (std::size_t index = 0; index < volumeOriginal.size(); ++index) volumeOriginal[index] = 0x02000000u + static_cast<std::uint32_t>(index);
+    std::memcpy(volumeTexels, volumeOriginal.data(), volumeBytes);
+    std::memset(volumeKeys, 0x10, volumeKeyCount);
+    AgcDriver::Graphics::RunColorMetadataPass(context, {AgcDriver::Graphics::ColorMetadataPass::Mode::DccDecompress, volumePass->targets});
+    bool volumeExpanded = true;
+    for (std::size_t index = 0; index < volumeOriginal.size() && volumeExpanded; ++index) {
+        std::uint32_t texel = 0;
+        std::memcpy(&texel, volumeTexels + index * 4, 4);
+        volumeExpanded = texel == volumeOriginal[index / 64 * 64];
+    }
+    Require(volumeExpanded && volumeKeysAre(0xff), "a DCC decompress of comp-to-single keys over a 3D target did not give every 256-byte block of every slice its first texel");
 }
 
 alignas(4096) std::array<std::uint8_t, 4096> cmaskMemory{};
