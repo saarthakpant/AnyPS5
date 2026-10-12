@@ -1291,6 +1291,9 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     return {};
 }
 
+// SPI_SHADER_Z_FORMAT only formats a depth, stencil or mask export, which the DB takes only under
+// the DB_SHADER_CONTROL export enables in PixelStageRunsMask, so a Z format left from an earlier
+// pixel program does not make an inert one run.
 bool PixelProgramSkipped(const QueueState& queue) {
     const auto low = find(queue.shader, 0x008, RegisterBank::Shader);
     const auto high = find(queue.shader, 0x009, RegisterBank::Shader);
@@ -1298,10 +1301,9 @@ bool PixelProgramSkipped(const QueueState& queue) {
     const auto& cx = queue.context;
     const auto targetMask = find(cx, 0x8e);
     const auto shaderMask = find(cx, 0x8f);
-    const auto zFormat = find(cx, 0x1c4);
     const auto shaderControl = find(cx, 0x203);
-    if (targetMask == cx.end() || shaderMask == cx.end() || zFormat == cx.end() || shaderControl == cx.end()) return false;
-    return (targetMask->second & shaderMask->second) == 0 && zFormat->second == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
+    if (targetMask == cx.end() || shaderMask == cx.end() || shaderControl == cx.end()) return false;
+    return (targetMask->second & shaderMask->second) == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
 }
 
 std::string NullPixelProgramRejection(const QueueState& queue) {

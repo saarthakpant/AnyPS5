@@ -371,7 +371,10 @@ void stateTests() {
     Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program with Z_EXPORT_ENABLE was skipped");
     queue.context[0x203] = 0;
     queue.context[0x1c4] = 1;
+    Require(AgcDriver::Graphics::PixelProgramSkipped(queue), "a Z format left without Z_EXPORT_ENABLE kept a pixel program that writes nothing running");
+    queue.context[0x203] = 1;
     Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program exporting depth was skipped");
+    queue.context[0x203] = 0;
     queue.context[0x1c4] = 0;
     queue.context[0x8e] = 0xf;
     Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program writing color was skipped");
