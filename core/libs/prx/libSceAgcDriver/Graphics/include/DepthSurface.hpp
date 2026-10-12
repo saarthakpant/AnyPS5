@@ -10,6 +10,7 @@
 
 namespace AgcDriver::Graphics {
 
+class StorageTexture;
 class Texture;
 
 VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target);
@@ -17,6 +18,10 @@ bool SampleLocationsCompatibleDepth(const Context& context, VkFormat format, std
 std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel);
 void ClearDepthSurfaces(VkDevice device);
 bool DepthSurfaceAt(std::uint64_t address);
+// A storage image whose view reads depth surfaces' planes (DepthSurfaceAt, at each layer's guest
+// address) takes their depth planes until each surface's next depth use, which copies the storage
+// image's layer back. A stencil plane or a multisampled surface throws.
+void LendDepthSurfaces(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, const std::shared_ptr<StorageTexture>& storage);
 bool DepthSurfaceAt(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource);
 std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);
 void NoteHtileDepthClear(std::uint64_t htileAddress);
