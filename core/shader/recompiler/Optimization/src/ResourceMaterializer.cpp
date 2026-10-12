@@ -488,7 +488,9 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
             throw std::runtime_error("image descriptor has an invalid width");
         }
         if (!validImageDescriptor(descriptor, image.r128) && !nullImageDescriptor(descriptor)) {
-            throw std::runtime_error("runtime image descriptor is invalid");
+            char text[192];
+            std::snprintf(text, sizeof(text), "runtime image descriptor is invalid (image %u%s, T# %08x %08x %08x %08x %08x %08x %08x %08x)", i, image.r128 ? ", r128" : "", descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4], descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
+            throw std::runtime_error(text);
         }
         snapshot.images[i] = descriptor;
     }
@@ -581,7 +583,11 @@ std::uint32_t emulatedCompareState(const ShaderInfo& info, const ResourceSnapsho
 void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot, const std::vector<TableResolution>& tables) {
     for (std::uint32_t i = 0u; i < plan.info.buffers.size(); ++i) {
         const auto decoded = decodeBufferDescriptor(snapshot.buffers.at(i));
-        if (decoded.Type() != 0u) throw std::runtime_error("buffer descriptor uses an unsupported type");
+        if (decoded.Type() != 0u) {
+            char text[160];
+            std::snprintf(text, sizeof(text), "buffer descriptor uses an unsupported type (buffer %u, V# %08x %08x %08x %08x)", i, decoded.fields[0], decoded.fields[1], decoded.fields[2], decoded.fields[3]);
+            throw std::runtime_error(text);
+        }
         if (plan.stage != IrShaderStage::Compute && decoded.AddTid()) throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
     }
     if (snapshot.flattenedSrt.size() != plan.srtReads.size()) throw std::runtime_error("runtime SRT size differs from the static interface");
