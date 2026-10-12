@@ -8,8 +8,10 @@
 namespace ShaderRecompiler {
 
 // hostSubgroupSize is the device subgroup width; wave64 workgroups on 32-wide subgroups run each
-// invocation as two guest lanes so a guest wave stays one host subgroup.
-ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context, std::uint32_t hostSubgroupSize, const MeshConfiguration* mesh = nullptr, const TessellationConfiguration* tessellation = nullptr);
+// invocation as two guest lanes so a guest wave stays one host subgroup. The position export
+// control and render target layers reach the stages that export positions (vertex, mesh and
+// tessellation evaluation; see GraphicsCompileContext).
+ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context, std::uint32_t hostSubgroupSize, const MeshConfiguration* mesh = nullptr, const TessellationConfiguration* tessellation = nullptr, std::uint32_t positionExportControl = 0, std::uint32_t renderTargetLayers = 1);
 
 }
 

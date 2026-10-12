@@ -382,8 +382,16 @@ void EmitAuxPositionExport(SpirvValueEmitContext& ctx, std::uint32_t data, const
         if (output.layer || output.viewport) {
             const auto raw = ExportRawComponent(ctx, data, component);
             if (output.layer) {
+                // The index is clamped to the attachments' last layer as SLICE_MAX clamps it; an
+                // index past them would leave every layer undefined in Vulkan.
+                const auto index = state.module.AllocateId();
+                state.module.AddFunction(spv::OpBitwiseAnd, TypeU32(state), index, raw, ConstantU32(state, 0x7ffu));
+                const auto layers = state.inputInfo.vertex->renderTargetLayers;
+                if (layers == 0u) {
+                    throw std::runtime_error("a render target index export has no render target layers");
+                }
                 const auto layer = state.module.AllocateId();
-                state.module.AddFunction(spv::OpBitwiseAnd, TypeU32(state), layer, raw, ConstantU32(state, 0x7ffu));
+                state.module.AddFunction(spv::OpExtInst, TypeU32(state), layer, GlslStd450(state), GLSLstd450UMin, index, ConstantU32(state, layers - 1u));
                 const auto pointer = state.program.Resources().stage == IrShaderStage::Mesh ? MeshOutputPointer(state, StageOutputKind::Layer) : state.layerVariable;
                 state.module.AddFunction(spv::OpStore, pointer, layer);
             }

@@ -106,16 +106,25 @@ void DefineModule(SpirvEmitterState& state) {
     if (state.cullDistanceVariable != 0) {
         state.module.EmitCapability(spv::CapabilityCullDistance);
     }
-    if (state.layerVariable != 0) {
-        state.module.RequireVersion(0x00010500u);
-        state.module.EmitCapability(spv::CapabilityShaderLayer);
+    if (state.layerVariable != 0 || state.viewportIndexVariable != 0) {
+        // Layer and ViewportIndex outputs of vertex and tessellation evaluation stages (mesh
+        // shaders write them per primitive under MeshShadingEXT): VK_EXT_shader_viewport_index_layer
+        // on any SPIR-V version, or the SPIR-V 1.5 capabilities of Vulkan 1.2 shaderOutputLayer and
+        // shaderOutputViewportIndex.
+        const auto supported = [&](spv::Capability capability) { return std::find(state.supportedCapabilities.begin(), state.supportedCapabilities.end(), static_cast<std::uint32_t>(capability)) != state.supportedCapabilities.end(); };
+        if (supported(spv::CapabilityShaderViewportIndexLayerEXT)) {
+            state.module.EmitCapability(spv::CapabilityShaderViewportIndexLayerEXT);
+            state.module.EmitExtension("SPV_EXT_shader_viewport_index_layer");
+        } else if ((state.layerVariable == 0 || supported(spv::CapabilityShaderLayer)) && (state.viewportIndexVariable == 0 || supported(spv::CapabilityShaderViewportIndex))) {
+            state.module.RequireVersion(0x00010500u);
+            if (state.layerVariable != 0) state.module.EmitCapability(spv::CapabilityShaderLayer);
+            if (state.viewportIndexVariable != 0) state.module.EmitCapability(spv::CapabilityShaderViewportIndex);
+        } else {
+            throw std::runtime_error("a vertex or tessellation evaluation stage that exports a render target layer or viewport index needs VK_EXT_shader_viewport_index_layer (or Vulkan 1.2 shaderOutputLayer and shaderOutputViewportIndex)");
+        }
     }
     if (InputVariableForKind(state, StageInputKind::Layer) != 0) {
         state.module.EmitCapability(spv::CapabilityGeometry);
-    }
-    if (state.viewportIndexVariable != 0) {
-        state.module.RequireVersion(0x00010500u);
-        state.module.EmitCapability(spv::CapabilityShaderViewportIndex);
     }
     if (InputVariableForKind(state, StageInputKind::SampleId) != 0) {
         state.module.EmitCapability(spv::CapabilitySampleRateShading);

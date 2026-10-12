@@ -1498,6 +1498,17 @@ void verifyMeshConfiguration() {
     other.graphics = GraphicsCompileContext{0u, {}, otherMesh, std::nullopt, {}};
     RecompileCacheKey::Build(other, key);
     require(key != first && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(other), "the cache keys ignore the mesh configuration");
+    auto layered = request;
+    layered.graphics->positionExportControl = 0x00240000u;
+    layered.graphics->renderTargetLayers = 32u;
+    const auto layeredReplay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(layered));
+    require(layeredReplay.request.graphics->positionExportControl == 0x00240000u && layeredReplay.request.graphics->renderTargetLayers == 32u, "the position export control or render target layers were lost in serialization");
+    RecompileCacheKey::Build(layered, key);
+    const auto layeredKey = key;
+    require(layeredKey != first, "the cache keys ignore the position export control");
+    layered.graphics->renderTargetLayers = 6u;
+    RecompileCacheKey::Build(layered, key);
+    require(key != layeredKey, "the cache keys ignore the render target layers");
     const std::array<std::uint32_t, 8> users{};
     request.context.waveSize = 32u;
     request.context.userData = users;
@@ -1637,12 +1648,12 @@ void verifyPixelRequestSerialization() {
     minimal.context.waveSize = 64;
     minimal.context.pixel = ShaderPixelStageInfo{};
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQREAAAA=", "new requests did not use serialization version 17");
+    require(requestPrefix(encoded, 8u) == "NVNQQRIAAAA=", "new requests did not use serialization version 18");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
     for (std::size_t bytes = 0; bytes < 19u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage or stencil reference export flag was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRIAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRMAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
 }

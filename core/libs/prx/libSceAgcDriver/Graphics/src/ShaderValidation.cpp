@@ -44,6 +44,8 @@ struct Module {
     std::optional<std::string> secondSource;
     bool position = false;
     bool clipDistance = false;
+    bool layer = false;
+    bool viewportIndex = false;
     bool primitiveIndices = false;
     bool fragmentBarycentric = false;
     std::map<std::uint32_t, std::vector<std::uint32_t>> modes;
@@ -115,6 +117,15 @@ struct Module {
             clipDistance = true;
             return;
         }
+        // The render target index (and viewport index) of a layered draw: the last vertex stage's
+        // output, an element of a per-primitive array in a mesh shader.
+        if ((value == spv::BuiltInLayer || value == spv::BuiltInViewportIndex) && !input && (vertex || stage == Stage::TessellationEvaluation || stage == Stage::Mesh)) {
+            auto& seen = value == spv::BuiltInLayer ? layer : viewportIndex;
+            const auto signature = Signature(type);
+            Require(!seen && (signature == "u32" || signature == "i32"), "invalid or duplicate layer or viewport index output");
+            seen = true;
+            return;
+        }
         if (stage == Stage::TessellationControl || stage == Stage::TessellationEvaluation || stage == Stage::Mesh) {
             const auto signature = Signature(type);
             if (!input && value == spv::BuiltInPosition) {
@@ -142,7 +153,7 @@ struct Module {
     }
 };
 
-Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool bufferInt64Atomics, bool shaderClipDistance) {
+Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool bufferInt64Atomics, bool shaderClipDistance, bool shaderViewportIndexLayer) {
     using Stage = ShaderRecompiler::ShaderStage;
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
@@ -243,6 +254,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     capability == spv::CapabilityImageGatherExtended ||
                     capability == spv::CapabilityImageQuery ||
                     ((vertex || evaluation) && shaderClipDistance && capability == spv::CapabilityClipDistance) ||
+                    ((vertex || evaluation) && shaderViewportIndexLayer && capability == spv::CapabilityShaderViewportIndexLayerEXT) ||
                     (fragment && geometryShader && capability == spv::CapabilityGeometry) ||
                     (fragment && sampleRateShading && capability == spv::CapabilitySampleRateShading) ||
                     capability == spv::CapabilityImageMSArray ||
@@ -300,6 +312,10 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 }
                 if (extension == "SPV_EXT_shader_stencil_export") {
                     Require(fragment, "SPV_EXT_shader_stencil_export requires a fragment shader");
+                    break;
+                }
+                if (extension == "SPV_EXT_shader_viewport_index_layer") {
+                    Require((vertex || evaluation) && shaderViewportIndexLayer, "SPV_EXT_shader_viewport_index_layer requires enabled VK_EXT_shader_viewport_index_layer in a vertex or tessellation evaluation shader");
                     break;
                 }
                 if (extension == "SPV_KHR_fragment_shader_barycentric") {
@@ -563,7 +579,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
 
 }
 
-std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool bufferInt64Atomics, bool shaderClipDistance) {
+std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool descriptorIndexing, bool imageInt64Atomics, bool geometryShader, bool sampleRateShading, bool bufferInt64Atomics, bool shaderClipDistance, bool shaderViewportIndexLayer) {
     using Stage = ShaderRecompiler::ShaderStage;
     const bool tessellation = state.stages.path == ShaderPath::Tessellation;
     const bool mesh = state.stages.path == ShaderPath::Geometry;
@@ -584,7 +600,7 @@ std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders,
         Require(shaders[i].program != nullptr, "missing compiled shader");
         Require(shaders[i].stage == expected, "graphics stage order disagrees");
         for (const auto& binding : shaders[i].program->bindings) Require(binding.descriptorSet == ShaderRecompiler::RuntimeAbi::DescriptorSet || (shaders[i].stage == ShaderRecompiler::ShaderStage::Fragment && binding.descriptorSet == ShaderRecompiler::RuntimeAbi::FragmentDescriptorSet), "graphics resource uses a descriptor set other than its stage's");
-        const auto current = Inspect(shaders[i], state, subgroup, fragmentShaderBarycentric, descriptorIndexing, imageInt64Atomics, geometryShader, sampleRateShading, bufferInt64Atomics, shaderClipDistance);
+        const auto current = Inspect(shaders[i], state, subgroup, fragmentShaderBarycentric, descriptorIndexing, imageInt64Atomics, geometryShader, sampleRateShading, bufferInt64Atomics, shaderClipDistance, shaderViewportIndexLayer);
         if (i != 0) {
             for (const auto& [location, signature] : current.inputs) {
                 const auto output = previous.outputs.find(location);
