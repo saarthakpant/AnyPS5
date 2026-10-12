@@ -1100,6 +1100,17 @@ void verifyLaneSelectedDescriptors() {
         });
     };
     require(holds(first) && holds(second), "lane-selected T#: the snapshot T#s are not the two SRT T#s");
+
+    // Words that are no T# (an S# and a V#, TYPE 0) in an image slot, and a T# in a V# slot, are
+    // read as null descriptors.
+    const std::array<std::uint32_t, 8> foreign{0x92u, 0xfff000u, 0x6500000u, 0u, 0x6e86c8a8u, 0x100020u, 1u, 0x4dfacu};
+    std::copy(foreign.begin(), foreign.end(), srt.begin() + 24);
+    srt[19] = 0xfacu | (Type2D << 28u);
+    AgcDriver::ShaderMemory foreignMemory({});
+    const auto foreignCapture = foreignMemory.Capture(request);
+    const auto isNull = [](const DescriptorValue& value) { return std::ranges::all_of(value.dwords, [](std::uint32_t word) { return word == 0u; }); };
+    require(holds(first) && std::ranges::any_of(foreignCapture->snapshot.images, isNull) && std::ranges::none_of(foreignCapture->snapshot.images, [&](const DescriptorValue& value) { return value.dwords[0] == foreign[0]; }), "foreign descriptors: an image slot holding no T# was not read as null");
+    require(!foreignCapture->snapshot.buffers.empty() && std::ranges::all_of(foreignCapture->snapshot.buffers, isNull), "foreign descriptors: a buffer slot holding a T# was not read as null");
 }
 
 void verifyProgramCounterRelativeData() {
