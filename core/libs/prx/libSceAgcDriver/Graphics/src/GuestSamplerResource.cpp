@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <array>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -109,7 +110,11 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
     static_cast<void>(anisoBias);
     const auto reductionMode = toVkReductionMode(filterMode);
     Require(!disableDegamma, "guest sampler descriptor disables degamma which is not implemented");
-    Require(lodBiasSec == 0, "guest sampler descriptor uses a secondary LOD bias which is not implemented");
+    if (lodBiasSec != 0) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "guest sampler descriptor uses a secondary LOD bias which is not implemented (S# %08x %08x %08x %08x)", words[0], words[1], words[2], words[3]);
+        Require(false, text);
+    }
     Require(!pointPreclamp, "guest sampler descriptor uses point preclamping which is not implemented");
     static_cast<void>(anisoOverride);
     Require(!blendZeroPrt, "guest sampler descriptor uses PRT blend-zero which is not implemented");
