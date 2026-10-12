@@ -1300,8 +1300,14 @@ void DepthStencilTests() {
     queue = makeState();
     queue.context[0x31b] = 1u << 26u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "mip exceeds");
+    // A view of several slices renders its first slice unless the vertex stage exports a render
+    // target index.
     queue.context[0x31b] = 1u << 13u;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "several array slices");
+    const auto unlayered = AgcDriver::Graphics::DecodeState(queue);
+    Require(unlayered.layers == 1u && unlayered.positionExports == 0u && unlayered.color.layers == 1u && unlayered.color.firstSlice == 0u && unlayered.color.lastSlice == 1u, "a multi-slice color view without a render target index export is not a single-layer draw");
+    queue.context[0x207] = 0x01240000u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beyond the slices of its surface");
+    queue.context[0x207] = 0;
     const auto sliced = reinterpret_cast<std::uintptr_t>(sliceMemory.data());
     queue.context[0x318] = static_cast<std::uint32_t>(sliced >> 8u);
     queue.context[0x390] = static_cast<std::uint32_t>(sliced >> 40u);
@@ -1319,6 +1325,31 @@ void DepthStencilTests() {
     Require(volume.color.address == sliced && volume.color.depth == 4u && volume.color.depthSlice == 2u, "a color view of one 3D depth slice did not keep the surface address and select the slice");
     queue.context[0x31b] = 4u | (4u << 13u);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beyond the 3D surface");
+    // Layered draws (PA_CL_VS_OUT_CNTL USE_VTX_RENDER_TARGET_INDX, VS_OUT_MISC_VEC_ENA and
+    // VS_OUT_MISC_SIDE_BUS_ENA, as Ghostrunner 2 sets them) attach every slice of the view.
+    queue.context[0x207] = 0x01240000u;
+    queue.context[0x31b] = 3u << 13u;
+    const auto layeredVolume = AgcDriver::Graphics::DecodeState(queue);
+    Require(layeredVolume.layers == 4u && layeredVolume.positionExports == 0x00240000u && layeredVolume.color.layers == 4u && layeredVolume.colors.front().layers == 4u && layeredVolume.color.depthSlice == 0u && layeredVolume.color.address == sliced, "a layered draw into every slice of a 3D target did not attach four layers from slice 0");
+    queue.context[0x31b] = 1u | (2u << 13u);
+    const auto layeredRange = AgcDriver::Graphics::DecodeState(queue);
+    Require(layeredRange.layers == 2u && layeredRange.color.depthSlice == 1u, "a layered draw into slices 1..2 of a 3D target did not attach two layers from slice 1");
+    queue.context[0x31b] = 2u | (2u << 13u);
+    const auto oneSlice = AgcDriver::Graphics::DecodeState(queue);
+    Require(oneSlice.layers == 1u && oneSlice.positionExports == 0u && oneSlice.color.depthSlice == 2u, "a render target index export into a one-slice view was routed");
+    queue.context[0x31b] = 2u | (1u << 13u);
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "SLICE_MAX precedes");
+    queue.context[0x31b] = 1u | (4u << 13u);
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beyond the slices of its surface");
+    queue.context[0x3b8] = 0x09000001;
+    queue.context[0x31b] = 1u << 13u;
+    const auto layeredArray = AgcDriver::Graphics::DecodeState(queue);
+    Require(layeredArray.layers == 2u && layeredArray.color.layers == 2u && layeredArray.color.arraySlice == 0u && layeredArray.color.arrayLastSlice == 1u && layeredArray.color.address == sliced, "a layered draw into both slices of a 2D array target did not attach two layers");
+    queue.context[0x207] = 0x012c0000u;
+    const auto viewportIgnored = AgcDriver::Graphics::DecodeState(queue);
+    Require(viewportIgnored.layers == 2u && viewportIgnored.positionExports == 0x00240000u, "a viewport index export changed the routed render target index exports");
+    queue.context[0x207] = 0;
+    queue.context[0x3b8] = 0x0a000003;
     queue.context[0x31b] = 0;
     queue.context[0x31c] |= 0x10000000;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "DCC 3D color targets");
@@ -3162,6 +3193,7 @@ struct ModuleShape {
     bool secondTarget = false;
     bool sampleId = false;
     bool layer = false;
+    bool layerOutput = false;
     bool fragDepth = false;
     std::uint32_t sampleMaskLength = 0;
     std::uint32_t floatControlsWidth = 0;
@@ -3243,6 +3275,14 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
             emit(annotations, spv::OpDecorate, {variable, spv::DecorationFlat});
             extraInterface.push_back(variable);
         }
+    }
+    if (shape.layerOutput) {
+        const auto pointer = id();
+        const auto variable = id();
+        emit(declarations, spv::OpTypePointer, {pointer, spv::StorageClassOutput, uintType});
+        emit(declarations, spv::OpVariable, {pointer, variable, spv::StorageClassOutput});
+        emit(annotations, spv::OpDecorate, {variable, spv::DecorationBuiltIn, spv::BuiltInLayer});
+        extraInterface.push_back(variable);
     }
     if (shape.fragDepth) {
         const auto pointer = id();
@@ -3333,14 +3373,20 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
     emit(words, spv::OpCapability, {spv::CapabilityShader});
     if (shape.sampleId) emit(words, spv::OpCapability, {spv::CapabilitySampleRateShading});
     if (shape.layer) emit(words, spv::OpCapability, {spv::CapabilityGeometry});
-    if (shape.barycentric) {
-        emit(words, spv::OpCapability, {spv::CapabilityFragmentBarycentricKHR});
-        const std::string extension = "SPV_KHR_fragment_shader_barycentric";
-        const auto count = (extension.size() + 4) / 4;
+    const auto extension = [&](const std::string& name) {
+        const auto count = (name.size() + 4) / 4;
         words.push_back((static_cast<std::uint32_t>(count + 1) << 16u) | spv::OpExtension);
         const auto start = words.size();
         words.resize(start + count, 0);
-        for (std::size_t i = 0; i < extension.size(); ++i) words[start + i / 4] |= static_cast<std::uint32_t>(static_cast<unsigned char>(extension[i])) << ((i % 4) * 8);
+        for (std::size_t i = 0; i < name.size(); ++i) words[start + i / 4] |= static_cast<std::uint32_t>(static_cast<unsigned char>(name[i])) << ((i % 4) * 8);
+    };
+    if (shape.barycentric) {
+        emit(words, spv::OpCapability, {spv::CapabilityFragmentBarycentricKHR});
+        extension("SPV_KHR_fragment_shader_barycentric");
+    }
+    if (shape.layerOutput) {
+        emit(words, spv::OpCapability, {spv::CapabilityShaderViewportIndexLayerEXT});
+        extension("SPV_EXT_shader_viewport_index_layer");
     }
     emit(words, spv::OpMemoryModel, {spv::AddressingModelLogical, spv::MemoryModelGLSL450});
     const auto entryPointOffset = words.size();
@@ -4429,6 +4475,11 @@ void validationTests() {
         expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false); }, "unsupported fragment built-in");
         vertex.spirv = makeModule({.parameterOutput = true, .sampleId = true});
         expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false); }, "unsupported device capability 35");
+        // The render target index of a layered draw, written by the vertex stage.
+        vertex.spirv = makeModule({.parameterOutput = true, .layerOutput = true});
+        pixel.spirv = makeModule({.fragment = true});
+        AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, false, false, false, false, false, false, true);
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false); }, "unsupported device capability 5254");
         vertex.spirv = makeModule({.parameterOutput = true});
         pixel.spirv = makeModule({.fragment = true, .barycentric = true, .barycentricComponents = 4});
         expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, true); }, "invalid barycentric built-in");

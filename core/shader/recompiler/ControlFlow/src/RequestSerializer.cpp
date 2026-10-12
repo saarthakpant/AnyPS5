@@ -689,6 +689,8 @@ void writeGraphicsCompileContext(Writer& writer, const GraphicsCompileContext& g
     writer.WriteU32(graphics.draw.indexCount);
     writer.WriteU32(graphics.draw.indexElementBytes);
     writer.WriteU32(graphics.draw.instanceCount);
+    writer.WriteU32(graphics.positionExportControl);
+    writer.WriteU32(graphics.renderTargetLayers);
 }
 
 GraphicsCompileContext readGraphicsCompileContext(Reader& reader, DeserializedGraphicsCompileContext& storage, std::uint32_t version) {
@@ -727,6 +729,10 @@ GraphicsCompileContext readGraphicsCompileContext(Reader& reader, DeserializedGr
     storage.draw.indexElementBytes = reader.ReadU32();
     storage.draw.instanceCount = reader.ReadU32();
     graphics.draw = storage.draw;
+    if (version >= 18u) {
+        graphics.positionExportControl = reader.ReadU32();
+        graphics.renderTargetLayers = reader.ReadU32();
+    }
     return graphics;
 }
 

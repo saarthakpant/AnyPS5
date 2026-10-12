@@ -161,6 +161,9 @@ struct Context {
     bool geometryShader = false;
     bool sampleRateShading = false;
     bool shaderClipDistance = false;
+    // VK_EXT_shader_viewport_index_layer: vertex and tessellation evaluation stages may write
+    // Layer and ViewportIndex (the render target index of layered draws).
+    bool shaderViewportIndexLayer = false;
     bool nullDescriptors = false;
     bool bufferInt64Atomics = false;
     const PlaceholderImages* placeholderImages = nullptr;

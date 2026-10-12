@@ -304,6 +304,11 @@ struct GraphicsCompileContext {
     std::optional<MeshConfiguration> mesh;
     std::optional<TessellationConfiguration> tessellation;
     GraphicsDrawParameters draw;
+    // PA_CL_VS_OUT_CNTL as the last vertex stage routes it (0: auxiliary position exports are
+    // dropped), and the layers of the draw's attachments: an exported render target index is
+    // clamped to renderTargetLayers - 1 as the color view's SLICE_MAX clamps it.
+    std::uint32_t positionExportControl = 0;
+    std::uint32_t renderTargetLayers = 1;
 };
 
 struct RecompileRequest {

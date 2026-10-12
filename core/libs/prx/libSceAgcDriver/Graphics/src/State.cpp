@@ -97,9 +97,12 @@ VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueSt
 
 // The register rules DecodeState and DrawRejection share (the precheck must reject exactly what
 // DecodeState would): the masks whose set bits are unsupported, and the depth-control verdict.
-// Render target index, viewport index and the misc export vector that carries them are accepted but
-// not routed: color targets are single-layer, so layered draws land in layer 0.
-constexpr std::uint32_t LayerExports = (1u << 18u) | (1u << 19u) | (1u << 21u) | (1u << 24u);
+// Render target index, viewport index and the misc export vector that carries them are accepted:
+// decodeLayers routes the render target index of a layered draw; the viewport index is not routed.
+constexpr std::uint32_t RenderTargetIndexExport = 1u << 18u;
+constexpr std::uint32_t ViewportIndexExport = 1u << 19u;
+constexpr std::uint32_t MiscVectorExport = 1u << 21u;
+constexpr std::uint32_t LayerExports = RenderTargetIndexExport | ViewportIndexExport | MiscVectorExport | (1u << 24u);
 constexpr std::uint32_t DepthControlMask = ~0x007007f0u;
 // EXEC_ON_HIER_FAIL / EXEC_ON_NOOP / EXEC_IF_OVERLAPPED (bits 9, 10, 17) only force the pixel shader
 // to run, which it always does here.
@@ -112,6 +115,46 @@ constexpr std::uint32_t ScanControlMask = ~0x76023fffu;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
 // Bits 26/27 (ZCLIP_NEAR/FAR_DISABLE) become depth clamping; bit 19 selects the [0, 1] clip space.
 constexpr std::uint32_t ClipControlMask = ~(0x80000u | 0x01000000u | 0x0c000000u);
+
+// PA_CL_VS_OUT_CNTL USE_VTX_RENDER_TARGET_INDX with VS_OUT_MISC_VEC_ENA: the last vertex stage
+// exports a render target index in the misc position vector, which the hardware adds to each color
+// view's SLICE_START and clamps to its SLICE_MAX. Views of one slice keep every primitive on it, so
+// the export is not routed; views of several become attachments of that many layers, and the
+// shader clamps the index below them.
+void decodeLayers(const Registers& cx, State& result) {
+    const auto control = read(cx, 0x207);
+    if ((control & ViewportIndexExport) != 0) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::fprintf(stderr, "[gpu] viewport index vertex exports are ignored; every primitive uses viewport 0 (PA_CL_VS_OUT_CNTL=0x%08x)\n", control);
+        }
+    }
+    if ((control & (RenderTargetIndexExport | MiscVectorExport)) != (RenderTargetIndexExport | MiscVectorExport)) return;
+    if (std::none_of(result.colors.begin(), result.colors.end(), [](const ColorTarget& color) { return color.lastSlice != color.firstSlice; })) {
+        if (const auto view = result.depth ? read(cx, 0x002) : 0u; ((view >> 13u) & 0x7ffu) > (view & 0x7ffu)) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                std::fprintf(stderr, "[gpu] layered depth targets are unsupported; render target index exports of a draw without layered color views render to the first depth slice (DB_DEPTH_VIEW=0x%08x)\n", view);
+            }
+        }
+        return;
+    }
+    std::uint32_t layers = 0;
+    for (auto& color : result.colors) {
+        const auto surfaceLast = color.depth > 1 ? color.depth - 1u : color.arrayLastSlice;
+        Require(color.lastSlice >= color.firstSlice, "the color view's SLICE_MAX precedes its SLICE_START");
+        Require(color.lastSlice <= surfaceLast, "a layered draw's color view reaches beyond the slices of its surface");
+        Require(color.samples == 1, "layered multisampled color targets are unsupported");
+        color.layers = color.lastSlice - color.firstSlice + 1u;
+        Require(layers == 0 || color.layers == layers, "layered draws into color views of different slice counts are unsupported");
+        layers = color.layers;
+    }
+    Require(!result.depth, "layered draws with a depth target are unsupported");
+    result.layers = layers;
+    result.positionExports = control & (RenderTargetIndexExport | MiscVectorExport);
+}
 
 bool zFormatSupported(std::uint32_t format) {
     return format == 0u || format == 1u || format == 2u || format == 3u || format == 9u;
@@ -691,13 +734,6 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     APS5_LOG_OUT_DEBUG("Topology=%u", static_cast<unsigned>(result.topology));
     result.primitiveRestart = read(queue.userConfig, 0x24b, RegisterBank::UserConfig) != 0 && !result.rectList && result.topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
-    if ((read(cx, 0x207) & LayerExports) != 0) {
-        static bool reported = false;
-        if (!reported) {
-            reported = true;
-            std::fprintf(stderr, "[gpu] layer/viewport index vertex exports are ignored (PA_CL_VS_OUT_CNTL=0x%08x)\n", read(cx, 0x207));
-        }
-    }
     zero(cx, 0x207, ~LayerExports, "clip distances, layer, viewport or auxiliary vertex exports");
     result.samples = decodeSamples(cx);
     decodeSampleLocations(cx, result);
@@ -785,7 +821,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     const auto exportFormat = result.hasColorTarget ? read(cx, 0x1c5) : 0u;
     APS5_LOG_OUT_DEBUG("Export format=%u", exportFormat);
     // SPI_SHADER_POS_FORMAT: POS0 must be a 4-component position; later vectors carry the misc/clip
-    // exports that PA_CL_VS_OUT_CNTL validation above already limits to ignored layer/viewport data.
+    // exports that PA_CL_VS_OUT_CNTL validation above already limits to layer/viewport data.
     Require((read(cx, 0x1c3) & 0xfu) == 4, "additional position exports are unsupported");
     for (std::uint32_t index = 0; index < exportCount; ++index) {
         const auto slot = exportSlots[index];
@@ -811,6 +847,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         }
         result.colors.push_back(color);
     }
+    decodeLayers(cx, result);
     if (result.hasColorTarget) {
         result.color = result.colors.front();
         if (result.depth) result.renderExtent = {std::min(result.renderExtent.width, result.depth->extent.width), std::min(result.renderExtent.height, result.depth->extent.height)};
@@ -998,7 +1035,8 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     const auto view = read(cx, 0x31b + stride);
     Require((view & ~0x3fffffffu) == 0, "reserved CB_COLOR_VIEW bits are set");
     const auto slice = view & 0x1fffu;
-    Require(slice == ((view >> 13u) & 0x1fffu), "color views of several array slices are unsupported");
+    color.firstSlice = slice;
+    color.lastSlice = (view >> 13u) & 0x1fffu;
     const auto viewMip = (view >> 26u) & 0xfu;
     const auto attrib2 = read(cx, 0x3b0 + slot);
     const auto maxMip = attrib2 >> 28u;
@@ -1010,7 +1048,8 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     Require(((attrib3 >> 24u) & 3u) != 0u || (attrib2 & 0x3fffu) == 0u, "1D color targets taller than one row are unsupported");
     if (volume) {
         color.depth = (attrib3 & 0x1fffu) + 1u;
-        Require(maxMip == 0 && (info & 0x10000000u) == 0, "mipmapped or DCC 3D color targets are unsupported");
+        Require(maxMip == 0, "mipmapped 3D color targets are unsupported");
+        Require((info & 0x10000000u) == 0, "DCC 3D color targets are unsupported");
         Require(slice < color.depth, "the color view slice is beyond the 3D surface");
         color.depthSlice = slice;
     } else if ((attrib3 & 0x1fffu) != 0) {

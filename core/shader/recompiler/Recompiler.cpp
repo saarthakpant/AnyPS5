@@ -108,7 +108,9 @@ RdnaProgram DecodeStageProgram(ShaderStageKind stage, std::span<const std::uint3
 ShaderStageInputInfo RequestInputInfo(const RecompileRequest& request) {
     const auto* mesh = request.graphics && request.graphics->mesh ? &*request.graphics->mesh : nullptr;
     const auto* tessellation = request.graphics && request.graphics->tessellation ? &*request.graphics->tessellation : nullptr;
-    return BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), mesh, tessellation);
+    const auto exportControl = request.graphics ? request.graphics->positionExportControl : 0u;
+    const auto layers = request.graphics ? request.graphics->renderTargetLayers : 1u;
+    return BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), mesh, tessellation, exportControl, layers);
 }
 
 std::uint32_t DeviceMemoryLdsBytes(const RecompileRequest& request) {

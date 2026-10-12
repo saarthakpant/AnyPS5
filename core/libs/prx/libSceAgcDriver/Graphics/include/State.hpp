@@ -58,6 +58,11 @@ struct ColorTarget {
     std::uint64_t arrayAddress = 0;
     std::uint32_t arrayLastSlice = 0;
     std::uint32_t arraySlice = 0;
+    // CB_COLOR_VIEW SLICE_START and SLICE_MAX. Only a layered draw (State::layers) reaches past the
+    // first slice; it attaches `layers` slices from firstSlice.
+    std::uint32_t firstSlice = 0;
+    std::uint32_t lastSlice = 0;
+    std::uint32_t layers = 1;
     std::uint32_t exportIndex = 0;
     bool uintExport = false;
     std::uint32_t pipeBankXor = 0;
@@ -118,6 +123,10 @@ struct State {
     std::uint32_t samples = 1;
     std::array<std::uint8_t, 8> sampleLocations{};
     bool customSampleLocations = false;
+    // The layers of every attachment, and the PA_CL_VS_OUT_CNTL bits the last vertex stage routes
+    // (the render target index in the misc position vector; 0 unless the draw is layered).
+    std::uint32_t layers = 1;
+    std::uint32_t positionExports = 0;
 };
 
 ShaderStages DecodeShaderStages(const QueueState& queue, bool vertexWorkgroup = false);

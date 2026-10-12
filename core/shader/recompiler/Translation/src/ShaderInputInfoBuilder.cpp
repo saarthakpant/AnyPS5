@@ -63,7 +63,7 @@ void _detectVertexBuffers(ShaderVertexInputInfo& info) {
 
 }
 
-ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context, std::uint32_t hostSubgroupSize, const MeshConfiguration* mesh, const TessellationConfiguration* tessellation) {
+ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context, std::uint32_t hostSubgroupSize, const MeshConfiguration* mesh, const TessellationConfiguration* tessellation, std::uint32_t positionExportControl, std::uint32_t renderTargetLayers) {
     switch (stage) {
     case ShaderStageKind::Compute: {
         if (!context.compute.has_value()) {
@@ -176,6 +176,11 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
             vertexStorage.resourcesDst[i].fetchIndex = vertex.fetchEmbedded ? 0u : vertex.resourcesDst[i].fetchIndex;
         }
         _detectVertexBuffers(vertexStorage);
+        if (stage == ShaderStageKind::Vertex || stage == ShaderStageKind::Mesh || stage == ShaderStageKind::TessellationEvaluation) {
+            if (renderTargetLayers == 0u) throw std::runtime_error("ShaderInputInfoBuilder: a draw has no render target layers");
+            vertexStorage.paClVsOutCntl = positionExportControl;
+            vertexStorage.renderTargetLayers = renderTargetLayers;
+        }
         if (stage == ShaderStageKind::Local || stage == ShaderStageKind::TessellationControl || stage == ShaderStageKind::TessellationEvaluation) {
             if (tessellation == nullptr) throw std::runtime_error("ShaderInputInfoBuilder: tessellation configuration is missing");
             if (tessellation->inputControlPoints == 0u || tessellation->inputControlPoints > 32u || tessellation->outputControlPoints == 0u || tessellation->outputControlPoints > 32u) throw std::runtime_error("ShaderInputInfoBuilder: invalid tessellation control-point counts");

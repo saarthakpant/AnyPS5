@@ -265,6 +265,7 @@ struct VulkanDevice::State {
     bool geometryShader = false;
     bool sampleRateShading = false;
     bool shaderClipDistance = false;
+    bool shaderViewportIndexLayer = false;
     bool shaderClock = false;
     bool narrowSubgroupClock = false;
     bool float64DenormPreserve = false;
@@ -1102,6 +1103,13 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         deviceExtensions.push_back(VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME);
         state->capabilities.push_back(spv::CapabilityFragmentShaderPixelInterlockEXT);
         state->spirvExtensions.push_back("SPV_EXT_fragment_shader_interlock");
+    }
+    // Layered draws: the last vertex stage writes the render target index to Layer.
+    if (hasExtension(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME)) {
+        deviceExtensions.push_back(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+        state->capabilities.push_back(spv::CapabilityShaderViewportIndexLayerEXT);
+        state->spirvExtensions.push_back("SPV_EXT_shader_viewport_index_layer");
+        state->shaderViewportIndexLayer = true;
     }
     if (hasExtension(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME)) {
         deviceExtensions.push_back(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
@@ -3071,6 +3079,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.geometryShader = state->geometryShader;
     context.sampleRateShading = state->sampleRateShading;
     context.shaderClipDistance = state->shaderClipDistance;
+    context.shaderViewportIndexLayer = state->shaderViewportIndexLayer;
     context.nullDescriptors = state->shaderProfile != nullptr && state->shaderProfile->NullDescriptors();
     context.bufferInt64Atomics = state->bufferInt64Atomics;
     context.placeholderImages = state->placeholderImages.get();

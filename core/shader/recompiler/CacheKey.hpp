@@ -86,6 +86,7 @@ private:
         append(key, request.context.floatMode);
         appendMesh(key, request);
         appendTessellation(key, request);
+        appendPositionExports(key, request);
         append(key, request.target);
         append(key, DebugProbeActive());
         append(key, RayTracingStrict());
@@ -106,6 +107,12 @@ private:
         append(key, tessellation != nullptr);
         if (tessellation == nullptr) return;
         for (const auto value : {tessellation->inputControlPoints, tessellation->outputControlPoints, tessellation->domain, tessellation->partitioning, tessellation->outputTopology}) append(key, value);
+    }
+
+    static void appendPositionExports(std::vector<std::uint64_t>& key, const RecompileRequest& request) {
+        if (request.shader.stage != ShaderStage::Vertex && request.shader.stage != ShaderStage::Mesh && request.shader.stage != ShaderStage::TessellationEvaluation) return;
+        append(key, request.graphics ? request.graphics->positionExportControl : 0u);
+        append(key, request.graphics ? request.graphics->renderTargetLayers : 1u);
     }
 
     template<typename TValue>

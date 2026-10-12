@@ -129,6 +129,7 @@ struct ShaderVertexInputInfo {
     std::uint32_t scratchSizeDwords = 0;
     std::uint32_t hostSubgroupSize = 64;
     std::uint32_t paClVsOutCntl = 0;
+    std::uint32_t renderTargetLayers = 1;
     ShaderClipSpaceTransform clipSpace;
     ShaderMeshInputInfo mesh;
     ShaderTessellationInputInfo tess;
