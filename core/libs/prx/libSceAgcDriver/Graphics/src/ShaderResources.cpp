@@ -2851,12 +2851,28 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
         throw std::runtime_error(text);
     }
     const auto address = descriptor.Base48();
-    const auto byteSize = descriptor.GetSize();
+    auto byteSize = descriptor.GetSize();
+    if (byteSize > context.limits.maxStorageBufferRange && address != 0) {
+        // Shaders keep unrelated words in SRT slots the path they take never reaches. A V# past the
+        // range limit binds what is committed at its base: nothing binds it as null, a shorter run
+        // cuts it there (accesses past it read 0, as from unmapped pages). A run that reaches the
+        // limit still throws, since cutting it would hide reads of mapped memory.
+        const auto limit = static_cast<std::uint64_t>(context.limits.maxStorageBufferRange) & ~std::uint64_t{3};
+        const auto committed = GuestMemory::CommittedRanges(address, static_cast<std::size_t>(limit), written);
+        const auto run = committed.empty() || committed.front().first != address ? 0u : (committed.front().second - address) & ~std::uint64_t{3};
+        if (run >= limit) {
+            char text[192];
+            std::snprintf(text, sizeof(text), "AGC graphics: shader buffer exceeds descriptor range limit over committed memory (V# %08x %08x %08x %08x, %llu bytes)", words[0], words[1], words[2], words[3], static_cast<unsigned long long>(byteSize));
+            throw std::runtime_error(text);
+        }
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true)) std::fprintf(stderr, "[gpu] a buffer V# past the descriptor range limit is bound as %s (V# %08x %08x %08x %08x, %llu bytes, %llu committed at its base)\n", run == 0 ? "null" : "its committed bytes", words[0], words[1], words[2], words[3], static_cast<unsigned long long>(byteSize), static_cast<unsigned long long>(run));
+        byteSize = run;
+    }
     if (byteSize == 0 || address == 0) {
         allocations.push_back({0, EmptyBufferBytes, false, nullptr, ShaderRecompiler::DescriptorRole::GuestBuffers, false});
         return allocations.size() - 1;
     }
-    Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
     auto size = static_cast<std::size_t>(byteSize);
     if (const std::uint64_t stride = descriptor.Stride(); stride != 0) {
