@@ -68,6 +68,9 @@ public:
     static bool CanDepthCopyFrom(const StorageTexture& source, const GuestTextureResource& descriptor);
     bool IsDepthCopy() const { return perUseCopy == PerUseCopy::RefreshedOnReuse; }
     bool RefreshDepthCopy();
+    // Debug aid (APS5_DUMP_STORAGE_VIEWS): dumps the storage image behind this view again when its
+    // content version moved since the last dump.
+    void DumpStorageViewIfChanged();
     struct DepthCopyCounts {
         std::uint64_t textures;
         std::uint64_t refreshes;
@@ -132,6 +135,7 @@ private:
     PerUseCopy perUseCopy = PerUseCopy::None;
     bool copiedOnce = false;
     std::uint64_t copiedVersion = 0;
+    std::uint64_t dumpedVersion = ~std::uint64_t{0};
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
     std::uint32_t copyWidth = 0, copyHeight = 0, copyLevels = 0, copyLayers = 0, copyElementBytes = 0;
 };
@@ -306,6 +310,7 @@ public:
     const GuestTextureResource& Descriptor() const { return descriptor; }
     std::uint32_t ImageLayers() const { return geometry.imageLayers; }
     std::uint32_t ImageDepth() const { return geometry.imageDepth; }
+    VkFormat StorageFormat() const { return storageFormat; }
     // Content version: advances when the image is re-uploaded or a shader wrote it. Together with
     // Generation (the write generation guest memory was last known to match the content at) it
     // validates textures copied from this image.
