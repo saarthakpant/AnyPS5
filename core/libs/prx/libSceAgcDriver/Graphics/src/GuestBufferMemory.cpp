@@ -639,6 +639,32 @@ bool sameRange(const HostImport& entry, const GuestAllocations::Lease& lease) {
 const HostImport* findImport(HostImports& state, std::uint64_t begin, std::uint64_t end);
 bool importsStale(const Context& context, const HostImports& state);
 
+// Whether pinning `bytes` more keeps the system heap host imports land in (the largest host-visible
+// heap that is not device-local) clear of the reserve its other allocations need: a quarter of the
+// heap's VK_EXT_memory_budget budget, at least 1 GiB. The driver's usage counts the pinned imports,
+// so past this the staging, readback and spilled buffers of that heap fail to allocate.
+bool importFitsHeap(const Context& context, std::uint64_t bytes, std::uint64_t& usage, std::uint64_t& budget) {
+    usage = 0;
+    budget = 0;
+    if (context.memoryProperties2 == nullptr || context.physical == VK_NULL_HANDLE) return true;
+    std::uint32_t heap = VK_MAX_MEMORY_HEAPS;
+    for (std::uint32_t type = 0; type < context.memory.memoryTypeCount; ++type) {
+        const auto& memoryType = context.memory.memoryTypes[type];
+        if ((memoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0 || (context.memory.memoryHeaps[memoryType.heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) continue;
+        if (heap == VK_MAX_MEMORY_HEAPS || context.memory.memoryHeaps[memoryType.heapIndex].size > context.memory.memoryHeaps[heap].size) heap = memoryType.heapIndex;
+    }
+    if (heap == VK_MAX_MEMORY_HEAPS) return true;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    properties.pNext = &reported;
+    context.memoryProperties2(context.physical, &properties);
+    usage = reported.heapUsage[heap];
+    budget = reported.heapBudget[heap];
+    if (budget == 0) return true;
+    const auto reserve = std::max<std::uint64_t>(1ull << 30u, budget / 4u);
+    return budget > reserve && usage + bytes <= budget - reserve;
+}
+
 const HostImport* importAllocation(const Context& context, HostImports& state, std::uint64_t address, const GuestAllocations::Lease& lease) {
     if (!importsStale(context, state)) {
         if (const auto* current = findImport(state, address, address + 1)) return current;
@@ -671,7 +697,8 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
         return (value ? std::strtoull(value, nullptr, 10) : 6144ull) << 20u;
     }();
     const auto live = state.liveBytes;
-    if (live + bytes > budget) {
+    std::uint64_t heapUsage = 0, heapBudget = 0;
+    if (live + bytes > budget || !importFitsHeap(context, bytes, heapUsage, heapBudget)) {
         // A refused import turns every later use of the range into CPU copies, so say so.
         static std::uint64_t refused = 0, refusedBytes = 0;
         static auto lastReport = std::chrono::steady_clock::now() - std::chrono::seconds(60);
@@ -679,7 +706,7 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
         refusedBytes += bytes;
         if (std::chrono::steady_clock::now() - lastReport > std::chrono::seconds(10)) {
             lastReport = std::chrono::steady_clock::now();
-            std::fprintf(stderr, "[gpu] host import budget: %llu MiB live of %llu MiB (APS5_HOST_IMPORT_MIB); %llu imports (%llu MiB) refused so far, last 0x%llx+0x%llx\n", static_cast<unsigned long long>(live >> 20u), static_cast<unsigned long long>(budget >> 20u), static_cast<unsigned long long>(refused), static_cast<unsigned long long>(refusedBytes >> 20u), static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes));
+            std::fprintf(stderr, "[gpu] host import budget: %llu MiB live of %llu MiB (APS5_HOST_IMPORT_MIB), system heap %llu of %llu MiB used; %llu imports (%llu MiB) refused so far, last 0x%llx+0x%llx\n", static_cast<unsigned long long>(live >> 20u), static_cast<unsigned long long>(budget >> 20u), static_cast<unsigned long long>(heapUsage >> 20u), static_cast<unsigned long long>(heapBudget >> 20u), static_cast<unsigned long long>(refused), static_cast<unsigned long long>(refusedBytes >> 20u), static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes));
         }
         return nullptr;
     }
