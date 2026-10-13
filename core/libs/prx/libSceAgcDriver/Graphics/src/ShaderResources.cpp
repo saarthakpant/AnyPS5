@@ -642,6 +642,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
             if ((source == nullptr || source == it->source) && (source != nullptr || *keys == DccKeys::Uncompressed) && StorageImageServesKeys(*it->source, resource.dccAddress)) {
                 if (!GuestMemory::UnchangedSince(address, bytes, it->source->Generation())) it->source->Refresh();
                 if (it->texture->IsDepthCopy()) it->texture->RefreshDepthCopy();
+                else it->texture->DumpStorageViewIfChanged();
                 it->keys = *keys;
                 touchTexture(cache, it);
                 logLookup({it->texture.get(), resource, guestBytes, *keys, 0, it->source.get()});
@@ -2466,6 +2467,7 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
     pendingSerialSeen = EpochRevalidate() && StorageTexture::PendingSerial() == serialBefore ? serialBefore : 0;
     for (const auto& texture : textures) {
         if (texture != nullptr && texture->IsDepthCopy()) texture->RefreshDepthCopy();
+        else if (texture != nullptr) texture->DumpStorageViewIfChanged();
     }
     return finish(fast, true);
 }
