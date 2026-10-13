@@ -1076,6 +1076,9 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
         Require(lastSlice <= (attrib3 & 0x1fffu), "the color view slice is beyond the array surface");
         color.arrayLastSlice = attrib3 & 0x1fffu;
         color.arraySlice = slice;
+    } else if (slice != 0 && ColorTileModeIsXor(color.tileMode)) {
+        color.arrayLastSlice = std::max(slice, lastSlice);
+        color.arraySlice = slice;
     }
     if (!volume && lastSlice != slice) {
         const auto exports = find(cx, 0x207);
