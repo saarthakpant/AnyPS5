@@ -20,8 +20,14 @@ void ClearDepthSurfaces(VkDevice device);
 bool DepthSurfaceAt(std::uint64_t address);
 // A storage image whose view reads depth surfaces' planes (DepthSurfaceAt, at each layer's guest
 // address) takes their depth planes until each surface's next depth use, which copies the storage
-// image's layer back. A stencil plane or a multisampled surface throws.
-void LendDepthSurfaces(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, const std::shared_ptr<StorageTexture>& storage);
+// image's layer back when it was written since. `written` marks the layers written (a storage
+// binding); a sampled view leaves them as they are. A stencil plane or a multisampled surface throws.
+void LendDepthSurfaces(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, const std::shared_ptr<StorageTexture>& storage, bool written);
+// A sampled view over depth surfaces that the depth image cannot serve as it is (a 2D array, a cube,
+// a base slice or level other than 0) reads its storage image after LendDepthSurfaces, through a
+// view kept per T# and swizzle (DepthStorageView).
+bool DepthSurfaceSampledThroughStorage(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource);
+std::shared_ptr<Texture> DepthStorageView(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, const std::shared_ptr<StorageTexture>& storage);
 bool DepthSurfaceAt(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource);
 std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);
 void NoteHtileDepthClear(std::uint64_t htileAddress);

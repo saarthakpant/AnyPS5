@@ -145,21 +145,24 @@ public:
         return texture;
     }
 
-    // A shader's storage image access over this surface: the storage image's layer takes the depth
-    // plane (after a pending clear) and holds it, results included, until the next depth use.
-    void Lend(const std::shared_ptr<StorageTexture>& storage, std::uint32_t layer) {
+    // A storage image's layer takes the depth plane (after a pending clear) and holds it, results
+    // included, until the next depth use; only an image written since (its version moved) is copied
+    // back. A storage binding marks the layer written (its write-back puts the plane in guest
+    // memory); a sampled view only reads it.
+    void Lend(const std::shared_ptr<StorageTexture>& storage, std::uint32_t layer, bool written) {
         if (lent == storage && lentLayer == layer) return;
         ApplyFastClear();
         copyPlane(storage, layer, false);
-        storage->MarkDirty();
+        if (written) storage->MarkDirty();
         lent = storage;
         lentLayer = layer;
+        lentVersion = storage->Version();
     }
 
     void Reclaim() {
         if (lent == nullptr) return;
         const auto storage = std::exchange(lent, nullptr);
-        copyPlane(storage, lentLayer, true);
+        if (storage->Version() != lentVersion) copyPlane(storage, lentLayer, true);
     }
 
     bool Holds(const Texture* texture) const {
@@ -179,11 +182,13 @@ private:
     std::map<std::array<std::uint32_t, 12>, std::shared_ptr<Texture>> textures;
     std::shared_ptr<StorageTexture> lent;
     std::uint32_t lentLayer = 0;
+    std::uint64_t lentVersion = 0;
+    std::shared_ptr<DeviceBuffer> staging;
 
     // Vulkan copies no depth plane straight into a color image, so the plane goes through a buffer.
     void copyPlane(const std::shared_ptr<StorageTexture>& storage, std::uint32_t layer, bool toDepth) {
         const auto bytes = static_cast<std::size_t>(target.extent.width) * target.extent.height * depthPlaneBytes(target.format);
-        auto staging = std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (staging == nullptr) staging = std::make_shared<DeviceBuffer>(context, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         auto* recorder = RecorderFor(context);
         std::unique_ptr<CommandBatch> batch;
         if (recorder == nullptr) batch = std::make_unique<CommandBatch>(context);
@@ -207,7 +212,7 @@ private:
             batch->SubmitAndWait();
             return;
         }
-        recorder->Keep(std::move(staging));
+        recorder->Keep(staging);
         recorder->Keep(storage);
         Recorder::CountBarriers(Recorder::CommandClass::Copy, 3);
     }
@@ -227,8 +232,10 @@ bool sameSurface(const DepthTarget& a, const DepthTarget& b) {
     return a.address == b.address && a.stencilAddress == b.stencilAddress && a.extent.width == b.extent.width && a.extent.height == b.extent.height && a.format == b.format && a.samples == b.samples;
 }
 
-std::mutex& surfacesMutex() {
-    static std::mutex mutex;
+// Recursive: a depth surface records copies, clears and recorder handovers under it, and the recorder
+// and storage image code they reach may ask about depth surfaces again on the same thread.
+std::recursive_mutex& surfacesMutex() {
+    static std::recursive_mutex mutex;
     return mutex;
 }
 
@@ -237,9 +244,20 @@ std::vector<std::unique_ptr<DepthSurface>>& surfaces() {
     return *list;
 }
 
+// Sampled views of storage images holding depth planes (DepthStorageView), by T# and swizzle.
+std::map<std::array<std::uint32_t, 12>, std::shared_ptr<Texture>>& storageViews() {
+    static auto* views = new std::map<std::array<std::uint32_t, 12>, std::shared_ptr<Texture>>();
+    return *views;
+}
+
 std::set<std::uint64_t>& clearedHtiles() {
     static auto* cleared = new std::set<std::uint64_t>();
     return *cleared;
+}
+
+// Views the depth image serves as it is: one 2D slice at the base level.
+bool directDepthView(const GuestTextureResource& resource) {
+    return resource.dimension == TextureDimension::k2D && resource.baseLevel == 0 && resource.lastLevel == 0 && resource.baseArray == 0;
 }
 
 // The newest surface at `address` whose depth or stencil plane the view reads: its own extent, and
@@ -316,6 +334,7 @@ void NoteHtileDepthClear(std::uint64_t htileAddress) {
 
 void ClearDepthSurfaces(VkDevice device) {
     std::lock_guard lock(surfacesMutex());
+    storageViews().clear();
     std::erase_if(surfaces(), [&](const auto& surface) { return surface->context.device == device; });
 }
 
@@ -328,6 +347,7 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
     if (found == list.rend()) return nullptr;
     const auto& target = (*found)->target;
     if (resource.width != target.extent.width || resource.height != target.extent.height) return nullptr;
+    if (!directDepthView(resource)) return nullptr;
     const bool stencil = target.stencilAddress != 0 && resource.baseAddress == target.stencilAddress;
     if (!stencil) {
         const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
@@ -382,7 +402,7 @@ bool DepthSurfaceAt(const Context& context, std::span<const std::uint32_t> words
     return aliasedSurface(context, words, resource, resource.baseAddress) != nullptr;
 }
 
-void LendDepthSurfaces(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, const std::shared_ptr<StorageTexture>& storage) {
+void LendDepthSurfaces(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, const std::shared_ptr<StorageTexture>& storage, bool written) {
     std::lock_guard lock(surfacesMutex());
     if (surfaces().empty()) return;
     const auto geometry = DescribeSurface(viewed);
@@ -398,8 +418,38 @@ void LendDepthSurfaces(const Context& context, std::span<const std::uint32_t> wo
             std::snprintf(text, sizeof(text), "AGC graphics: storage image access to the %s plane of %ux depth surface 0x%llx (vk format %d) is not implemented (storage=%ux%u guest format=%u layer %u)", stencil ? "stencil" : "depth", target.samples, static_cast<unsigned long long>(target.address), static_cast<int>(target.format), viewed.width, viewed.height, viewed.format, layer);
             throw std::runtime_error(text);
         }
-        surface->Lend(storage, layer);
+        surface->Lend(storage, layer, written);
     }
+}
+
+std::shared_ptr<Texture> DepthStorageView(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, const std::shared_ptr<StorageTexture>& storage) {
+    std::array<std::uint32_t, 12> key{};
+    std::copy_n(words.begin(), std::min<std::size_t>(words.size(), 8), key.begin());
+    key[8] = components.r;
+    key[9] = components.g;
+    key[10] = components.b;
+    key[11] = components.a;
+    {
+        std::lock_guard lock(surfacesMutex());
+        auto& views = storageViews();
+        if (const auto found = views.find(key); found != views.end() && found->second->StorageSource() == storage.get()) return found->second;
+    }
+    auto view = std::make_shared<Texture>(context, storage, resource, components);
+    std::lock_guard lock(surfacesMutex());
+    storageViews().insert_or_assign(key, view);
+    return view;
+}
+
+bool DepthSurfaceSampledThroughStorage(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource) {
+    if (directDepthView(resource)) return false;
+    std::lock_guard lock(surfacesMutex());
+    if (surfaces().empty()) return false;
+    const auto geometry = DescribeSurface(resource);
+    if (geometry.imageDepth != 1) return false;
+    for (std::uint32_t layer = 0; layer < geometry.imageLayers; ++layer) {
+        if (aliasedSurface(context, words, resource, resource.baseAddress + geometry.GuestLayerOffset(layer)) != nullptr) return true;
+    }
+    return false;
 }
 
 bool DepthSurfaceAt(std::uint64_t address) {

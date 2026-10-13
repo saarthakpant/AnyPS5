@@ -519,6 +519,13 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
     RequireNoMultisampleTarget(resource.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a texture read");
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
+    if (DepthSurfaceSampledThroughStorage(context, words, resource)) {
+        const auto storage = cachedStorageTexture(context, words, resource, 0, guestBytes);
+        LendDepthSurfaces(context, words, resource, storage, false);
+        auto view = DepthStorageView(context, words, resource, components, storage);
+        logLookup({view.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
+        return view;
+    }
     if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
         logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
         return depth;
@@ -838,11 +845,8 @@ GuestTextureResource StorageSurface(const Context& context, const GuestTextureRe
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, std::uint32_t mip, std::uint64_t guestBytes) {
     RequireNoMultisampleTarget(viewed.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a storage image access");
     static const bool disabled = std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
-    if (disabled) {
-        auto texture = StorageTexture::Create(context, *context.detiler, viewed, mip);
-        LendDepthSurfaces(context, words, viewed, texture);
-        return texture;
-    }
+    if (disabled) return StorageTexture::Create(context, *context.detiler, viewed, mip);
+    static_cast<void>(words);
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     const bool profile = LookupOutcomes::Profiled();
     auto start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -896,7 +900,6 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
             for (auto& resource : resources) recorder->Keep(std::move(resource));
         }
     }
-    LendDepthSurfaces(context, words, viewed, texture);
     return texture;
 }
 
@@ -2333,7 +2336,11 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
                         if (storageIndex >= storageTextures.size()) return false;
                         std::shared_ptr<StorageTexture> expected;
                         if (SameAsPreviousStorageElement(binding, element) && StorageDedupeEnabled()) expected = storageTextures[storageIndex - 1];
-                        else expected = cachedStorageTexture(context, words, DecodeTextureResource(words), storageMips[storageIndex]);
+                        else {
+                            const auto resource = DecodeTextureResource(words);
+                            expected = cachedStorageTexture(context, words, resource, storageMips[storageIndex]);
+                            if (expected == storageTextures[storageIndex]) LendDepthSurfaces(context, words, resource, expected, true);
+                        }
                         if (expected != storageTextures[storageIndex]) return false;
                         ++storageIndex;
                     }
@@ -3372,7 +3379,10 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
         const auto guestBytes = record != nullptr && record->decoded ? record->guestBytes : DescribeSurface(resource).guestBytes;
         // The same surface as the previous element: its image was just looked up and refreshed.
         if (sameAsPrevious && StorageDedupeEnabled()) storageTextures.push_back(storageTextures.back());
-        else storageTextures.push_back(cachedStorageTexture(context, words, resource, mip, guestBytes));
+        else {
+            storageTextures.push_back(cachedStorageTexture(context, words, resource, mip, guestBytes));
+            LendDepthSurfaces(context, words, resource, storageTextures.back(), true);
+        }
         storageMips.push_back(mip);
         storageKeys.push_back(resource.dccAddress);
         storageFirstLayer.push_back(firstLayer);
