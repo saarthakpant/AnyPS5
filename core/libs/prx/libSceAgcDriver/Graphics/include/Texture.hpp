@@ -74,6 +74,10 @@ public:
     // Debug aid (APS5_DUMP_STORAGE_VIEWS): dumps the storage image behind this view again when its
     // content version moved since the last dump.
     void DumpStorageViewIfChanged();
+    // Debug aid (APS5_DUMP_STORAGE_VIEWS_FROM=<present index>): counts presents; the dumps start at
+    // that present and then repeat on every bind of a matching view, which catches an image the GPU
+    // rewrites in place (its content version does not move) at a later scene.
+    static void NoteStorageDumpPresent();
     struct DepthCopyCounts {
         std::uint64_t textures;
         std::uint64_t refreshes;

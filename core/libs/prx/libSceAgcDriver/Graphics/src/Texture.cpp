@@ -612,10 +612,27 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
     }
 }
 
+namespace {
+
+std::atomic<std::uint64_t> storageDumpPresents{0};
+
+// APS5_DUMP_STORAGE_VIEWS_FROM=<present index>: no dump before that many presents, and from then on
+// a dump at every bind of a matching view (the per-address cap still applies).
+std::uint64_t StorageDumpFromPresent() {
+    static const std::uint64_t from = [] { const char* text = std::getenv("APS5_DUMP_STORAGE_VIEWS_FROM"); return text ? std::strtoull(text, nullptr, 0) : 0ull; }();
+    return from;
+}
+
+}
+
+void Texture::NoteStorageDumpPresent() {
+    storageDumpPresents.fetch_add(1, std::memory_order_relaxed);
+}
+
 void Texture::DumpStorageViewIfChanged() {
     if (storageSource == nullptr || IsDepthCopy()) return;
     const auto version = storageSource->Version();
-    if (version == dumpedVersion) return;
+    if (version == dumpedVersion && StorageDumpFromPresent() == 0) return;
     dumpedVersion = version;
     DumpStorageView(context, *storageSource, storageSource->Descriptor());
 }
@@ -763,6 +780,7 @@ namespace {
 void DumpStorageView(const Context& context, const StorageTexture& source, const GuestTextureResource& descriptor) {
     static const std::string dumpList = [] { const char* text = std::getenv("APS5_DUMP_STORAGE_VIEWS"); return text ? std::string(text) : std::string(); }();
     if (dumpList.empty()) return;
+    if (storageDumpPresents.load(std::memory_order_relaxed) < StorageDumpFromPresent()) return;
     char address[32];
     std::snprintf(address, sizeof(address), "%llx", static_cast<unsigned long long>(descriptor.baseAddress));
     char extent[32];
