@@ -7,6 +7,8 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
+#include <mutex>
+#include <set>
 #include <bit>
 #include <bitset>
 #include <cmath>
@@ -1107,6 +1109,12 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     if (ColorTileModeIsXor(color.tileMode)) {
         color.pipeBankXor = static_cast<std::uint32_t>(color.surfaceAddress & (ColorTileModeBlockBytes(color.tileMode) - 1u));
         color.surfaceAddress -= color.pipeBankXor;
+    }
+    if (slice != 0 && !volume && color.arrayLastSlice == 0) {
+        static std::mutex reportMutex;
+        static std::set<std::uint64_t> reported;
+        std::lock_guard lock(reportMutex);
+        if (reported.size() < 16 && reported.insert((static_cast<std::uint64_t>(attrib3) << 32u) | view).second) std::fprintf(stderr, "[gpu] sliced color view of a surface without array slices: CB_COLOR_VIEW 0x%08x CB_COLOR_ATTRIB 0x%08x CB_COLOR_ATTRIB2 0x%08x CB_COLOR_ATTRIB3 0x%08x CB_COLOR_INFO 0x%08x extent %ux%u mips %u\n", view, attrib, attrib2, attrib3, info, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount);
     }
     color.arrayAddress = color.arrayLastSlice != 0 ? color.surfaceAddress : 0;
     if (slice != 0 && !volume) color.surfaceAddress += slice * ComputeSurfaceSize(ComputeElementMipLayout(ColorTextureTileMode(color.tileMode), color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount), 1);

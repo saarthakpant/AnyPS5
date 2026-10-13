@@ -33,6 +33,12 @@
 #include <utility>
 
 namespace AgcDriver::Graphics {
+namespace {
+void DumpStorageView(const Context& context, const StorageTexture& source, const GuestTextureResource& descriptor);
+}
+}
+
+namespace AgcDriver::Graphics {
 
 namespace {
 
@@ -534,6 +540,14 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
     }
 }
 
+void Texture::DumpStorageViewIfChanged() {
+    if (storageSource == nullptr || depthCopy) return;
+    const auto version = storageSource->Version();
+    if (version == dumpedVersion) return;
+    dumpedVersion = version;
+    DumpStorageView(context, *storageSource, storageSource->Descriptor());
+}
+
 bool Texture::RefreshDepthCopy() {
     if (!depthCopy || storageSource == nullptr) return false;
     if (copiedOnce && storageSource->Version() == copiedVersion) return false;
@@ -620,6 +634,58 @@ bool Texture::CanCopyFrom(const StorageTexture& source, const GuestTextureResour
     return descriptor.baseAddress == from.baseAddress && descriptor.pipeBankXor == from.pipeBankXor && descriptor.width == from.width && descriptor.height == from.height && descriptor.dimension == from.dimension && descriptor.tileMode == from.tileMode && descriptor.mipCount <= from.mipCount && descriptor.depthOrLastArray == from.depthOrLastArray && BytesPerElement(descriptor.format) == BytesPerElement(from.format) && BlockWidth(descriptor.format) == BlockWidth(from.format);
 }
 
+namespace {
+
+// Debug aid: APS5_DUMP_STORAGE_VIEWS=<hex addresses or extents ("64x64"), comma separated> saves
+// mip 0 of such a storage image, every layer or depth slice, when a sampled view of it is created
+// (up to 8 times per address) as storage_<address>_<n>.raw: u32 width, height, slices, VkFormat,
+// then tightly packed rows, slice after slice. The recorded work is waited for first, so the
+// file holds what the view's first consumer would sample.
+void DumpStorageView(const Context& context, const StorageTexture& source, const GuestTextureResource& descriptor) {
+    static const std::string dumpList = [] { const char* text = std::getenv("APS5_DUMP_STORAGE_VIEWS"); return text ? std::string(text) : std::string(); }();
+    if (dumpList.empty()) return;
+    char address[32];
+    std::snprintf(address, sizeof(address), "%llx", static_cast<unsigned long long>(descriptor.baseAddress));
+    char extent[32];
+    std::snprintf(extent, sizeof(extent), "%ux%u", descriptor.width, descriptor.height);
+    if (dumpList.find(address) == std::string::npos && dumpList.find(extent) == std::string::npos) return;
+    static std::mutex dumpMutex;
+    static std::map<std::uint64_t, int> dumped;
+    int index = 0;
+    {
+        std::lock_guard lock(dumpMutex);
+        auto& count = dumped[descriptor.baseAddress];
+        if (count >= 32) return;
+        index = count++;
+    }
+    if (auto* recorder = Recorder::Active()) recorder->Sync();
+    const auto& from = source.Descriptor();
+    const auto slices = std::max(source.ImageLayers(), source.ImageDepth());
+    const auto elementBytes = BytesPerElement(from.format);
+    const auto bytes = static_cast<std::size_t>(from.width) * from.height * slices * elementBytes;
+    Buffer dump(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    CommandBatch batch(context);
+    const auto commands = batch.Handle();
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, source.ImageLayers()};
+    region.imageExtent = {from.width, from.height, source.ImageDepth()};
+    context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, source.Image(), VK_IMAGE_LAYOUT_GENERAL, dump.Handle(), 1, &region);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    batch.SubmitAndWait();
+    char name[64];
+    std::snprintf(name, sizeof(name), "storage_%llx_%d.raw", static_cast<unsigned long long>(descriptor.baseAddress), index);
+    if (std::FILE* file = std::fopen(name, "wb")) {
+        const std::uint32_t header[4] = {from.width, from.height, slices, static_cast<std::uint32_t>(source.StorageFormat())};
+        std::fwrite(header, sizeof(header), 1, file);
+        std::fwrite(dump.Bytes().data(), 1, bytes, file);
+        std::fclose(file);
+        std::fprintf(stderr, "[gpu] %s: %ux%u, %u slices, VkFormat %d, storage dim %d mips %u depthOrLastArray %u base %u tile %d; sampled as %ux%u dim %d mips %u\n", name, from.width, from.height, slices, static_cast<int>(source.StorageFormat()), static_cast<int>(from.dimension), from.mipCount, from.depthOrLastArray, from.baseArray, static_cast<int>(from.tileMode), descriptor.width, descriptor.height, static_cast<int>(descriptor.dimension), descriptor.mipCount);
+    }
+}
+
+}
+
 Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components) : context(context), storageSource(source) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PhaseTimer timer;
@@ -648,6 +714,8 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
         createFirstLayerView(descriptor, viewInfo);
         prepareBaseLevelView(descriptor, viewInfo);
+        DumpStorageView(context, *source, descriptor);
+        dumpedVersion = source->Version();
         if (profile) {
             auto& totals = Profile();
             totals.view += timer.lap();
@@ -1688,6 +1756,14 @@ bool StorageTexture::Refresh() {
             }
         }
     }
+    if (CaptureTrace::Enabled()) {
+        std::string units, stamps;
+        for (std::uint32_t unit = 0; unit < trackedLayers; ++unit) {
+            units += changed[unit] ? '1' : '0';
+            stamps += unit < stampedBlocks.size() ? static_cast<char>('0' + stampedBlocks[unit]) : '-';
+        }
+        CaptureTrace::Log("refresh-decision image=%llx unchanged=%d tracked=%d compared=%d keysChanged=%d originalValid=%d blockUnits=%d changed=%s stamped=%s", static_cast<unsigned long long>(descriptor.baseAddress), unchanged ? 1 : 0, tracked ? 1 : 0, compared ? 1 : 0, keysChanged ? 1 : 0, originalValid ? 1 : 0, blockUnits ? 1 : 0, units.c_str(), stamps.c_str());
+    }
     if (unchanged) {
         ++Profile().storageReused;
         layerGeneration.assign(trackedLayers, current);
@@ -1946,6 +2022,11 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     // A layer selection applies to the direct path alone (the others upload everything); it names
     // array layers, which the tracked layers are when there are several.
     if (layers != nullptr && ((!blockUnits && trackedLayers != arrayLayers) || std::all_of(layers->begin(), layers->end(), [](bool selected) { return selected; }))) layers = nullptr;
+    if (CaptureTrace::Enabled()) {
+        std::string units;
+        for (std::uint32_t unit = 0; unit < trackedLayers; ++unit) units += layers == nullptr || (*layers)[unit] ? '1' : '0';
+        CaptureTrace::Log("upload-units image=%llx units=%s blockUnits=%d originalValid=%d", static_cast<unsigned long long>(descriptor.baseAddress), units.c_str(), blockUnits ? 1 : 0, originalValid ? 1 : 0);
+    }
     const auto now = GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
     const auto stampLayers = [&](bool selectedOnly) {
         const bool whole = !selectedOnly || layers == nullptr;
@@ -2414,6 +2495,11 @@ std::uint64_t StorageTexture::uploadWindows(const HostImport& import, std::span<
         if (!source.shadow) allShadow = false;
     }
     if (allShadow && !sources.empty() && (std::strcmp(uploadReason, "flushed") == 0 || std::strcmp(uploadReason, "store") == 0)) uploadReason = "shadow";
+    if (CaptureTrace::Enabled()) {
+        std::string text;
+        for (const auto& source : sources) text += std::string(source.shadow ? " slab+" : " import+") + std::to_string(source.begin) + ".." + std::to_string(source.end);
+        CaptureTrace::Log("upload-sources image=%llx%s", static_cast<unsigned long long>(descriptor.baseAddress), text.c_str());
+    }
     auto windows = sliceWindows(pieces);
     Require(!windows.empty(), "storage image upload selects no unit");
     const auto sourceOf = [&](const SliceWindow& window) -> const ShadowRun& {
@@ -2606,6 +2692,12 @@ std::uint64_t StorageTexture::writeBackWindows(const HostImport& import, std::sp
         }
     }
     std::sort(seeds.begin(), seeds.end(), [](const ShadowedRange& a, const ShadowedRange& b) { return a.begin < b.begin; });
+    if (CaptureTrace::Enabled()) {
+        std::string text;
+        for (const auto& range : shadowed) text += " slab+" + std::to_string(range.begin - descriptor.baseAddress) + ".." + std::to_string(range.end - descriptor.baseAddress);
+        for (const auto& [from, to] : imported) text += " import+" + std::to_string(from - descriptor.baseAddress) + ".." + std::to_string(to - descriptor.baseAddress);
+        CaptureTrace::Log("writeback-pieces image=%llx seeds=%zu%s", static_cast<unsigned long long>(descriptor.baseAddress), seeds.size(), text.c_str());
+    }
     std::vector<CopiedBytes> copied;
     for (std::size_t i = 0; i < windows.size(); ++i) {
         const auto& window = windows[i];
@@ -3952,6 +4044,7 @@ std::uint64_t StorageTexture::borrowUnits(StorageTexture& source, const std::vec
 }
 
 void StorageTexture::writeBack(std::uint64_t address, std::size_t bytes) {
+    DumpStorageView(context, *this, descriptor);
     // Block units are stored per access; an image whose units keep being asked for in pieces (a
     // consumer touching it through many small ranges, each piece re-arming the pending memos of
     // the next dispatch) stores every pending unit once more than `pieces` partial stores fall
@@ -4077,6 +4170,13 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             if (!keep.empty() && keep.back().second == from) keep.back().second = to;
             else keep.emplace_back(from, to);
         }
+    }
+    if (CaptureTrace::Enabled()) {
+        std::string ranges;
+        for (const auto& [from, to] : keep) ranges += "+" + std::to_string(from - descriptor.baseAddress) + ".." + std::to_string(to - descriptor.baseAddress);
+        std::string blocks;
+        for (const auto value : changedBlocks) blocks += static_cast<char>('0' + value);
+        CaptureTrace::Log("writeback-keep image=%llx tracked=%d compared=%d skipped=%zu blocks=%s keep=%s", static_cast<unsigned long long>(descriptor.baseAddress), tracked ? 1 : 0, compared ? 1 : 0, skipped, blocks.c_str(), ranges.c_str());
     }
     // Debug aid: APS5_TRACE_FLUSH also names the blocks a write-back leaves to the CPU.
     static const bool traceKept = std::getenv("APS5_TRACE_FLUSH") != nullptr;
