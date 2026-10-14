@@ -6,6 +6,8 @@
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <cstdio>
 
 namespace AgcDriver::DriverDetail {
 
@@ -35,7 +37,16 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     using Stage = ShaderRecompiler::ShaderStage;
     using Role = ShaderRecompiler::ProgramRole;
 
-    static const std::uint64_t dumpTarget = [] { const char* text = std::getenv("APS5_DUMP_DRAW_SHADERS"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+    // APS5_DUMP_DRAW_SHADERS=<hex target address> or <WxHxL> (the target's extent and layer count,
+    // for a target whose address moves between runs): the latter is encoded as (W << 40) | (H << 16) | L
+    // with the top bit set, which no guest address has.
+    static const std::uint64_t dumpTarget = [] {
+        const char* text = std::getenv("APS5_DUMP_DRAW_SHADERS");
+        if (text == nullptr) return 0ull;
+        unsigned width = 0, height = 0, layers = 1;
+        if (std::sscanf(text, "%ux%ux%u", &width, &height, &layers) >= 2 && std::strchr(text, 'x') != nullptr) return (1ull << 63u) | (static_cast<std::uint64_t>(width) << 40u) | (static_cast<std::uint64_t>(height) << 16u) | layers;
+        return std::strtoull(text, nullptr, 16);
+    }();
 
     static const std::uint64_t dumpSlot1 = [] { const char* text = std::getenv("APS5_DUMP_DRAW_SLOT1"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
 

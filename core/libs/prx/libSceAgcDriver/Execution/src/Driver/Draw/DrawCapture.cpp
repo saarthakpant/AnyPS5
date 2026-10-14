@@ -77,7 +77,8 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     if (dumpTarget != 0) {
 
         const auto slot0 = (static_cast<std::uint64_t>(readRegister(queue.context, 0x390)) << 40u) | (static_cast<std::uint64_t>(readRegister(queue.context, 0x318)) << 8u);
-        if ((graphics.hasColorTarget && graphics.color.address == dumpTarget) || slot0 == dumpTarget) static_cast<void>(dumpRequest(program.binary.codeAddress, request));
+        const auto extentKey = graphics.hasColorTarget ? (1ull << 63u) | (static_cast<std::uint64_t>(graphics.color.extent.width) << 40u) | (static_cast<std::uint64_t>(graphics.color.extent.height) << 16u) | graphics.renderLayers : 0ull;
+        if ((graphics.hasColorTarget && (graphics.color.address == dumpTarget || extentKey == dumpTarget)) || slot0 == dumpTarget) static_cast<void>(dumpRequest(program.binary.codeAddress, request));
     }
     if (dumpSlot1 != 0) {
         const auto value = [&](std::uint32_t offset) -> std::uint64_t { const auto it = queue.context.find(offset); return it == queue.context.end() ? 0u : it->second; };
