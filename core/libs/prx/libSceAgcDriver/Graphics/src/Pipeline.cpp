@@ -173,6 +173,29 @@ void appendKey(std::vector<std::byte>& key, const TValue& value) {
     key.insert(key.end(), bytes.begin(), bytes.end());
 }
 
+// Whether the stage's module declares a variable decorated BuiltIn Layer (the mesh stage's
+// per-primitive layer output or the fragment stage's layer input).
+bool declaresLayerBuiltin(const CompiledShader& shader) {
+    const auto& words = shader.program->spirv;
+    for (std::size_t cursor = 5; cursor + 4 <= words.size();) {
+        const auto count = words[cursor] >> 16u;
+        if (count == 0) break;
+        if ((words[cursor] & 0xffffu) == spv::OpDecorate && count == 4 && words[cursor + 2] == spv::DecorationBuiltIn && words[cursor + 3] == spv::BuiltInLayer) return true;
+        cursor += count;
+    }
+    return false;
+}
+
+// A fragment stage that reads the Layer builtin behind a mesh stage keeps the fast-linked
+// pipeline: AMD's Windows driver (amdvlk) reads a fragment shader's Layer from an attribute the
+// mesh stage exports per primitive, and its link-time-optimized relink of the libraries drops
+// that export, so the fragment shader read 0 in every layer (Ghostrunner 2's color grading
+// LUT and translucency volumes, see docs/dev/debt/libSceAgcDriver.md). The fast link keeps it.
+bool keepsFastLink(const State& state, std::span<const CompiledShader> shaders) {
+    if (!state.stages.mesh.has_value()) return false;
+    return std::any_of(shaders.begin(), shaders.end(), [](const CompiledShader& shader) { return shader.stage == ShaderRecompiler::ShaderStage::Fragment && shader.program != nullptr && declaresLayerBuiltin(shader); });
+}
+
 bool libraryKeys(PipelineLibraryKeys& keys, const Context& context, const State& state, const VertexInputLayout& input, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders) {
     using Stage = ShaderRecompiler::ShaderStage;
     if (!context.graphicsPipelineLibrary || context.pipelineExecutableInfo || state.depthBiasPerFace || state.rectList || SplitsAlternateAlpha(state)) return false;
@@ -498,7 +521,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
             prebuilt = true;
             return;
         }
-        if (libraries) pipeline = LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, &optimized, false, _modules);
+        if (libraries) pipeline = LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, keepsFastLink(state, shaders) ? nullptr : &optimized, false, _modules);
         else {
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
             Check(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateGraphicsPipelines");

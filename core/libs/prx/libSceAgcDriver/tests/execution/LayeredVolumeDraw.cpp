@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineLibrary.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
@@ -214,13 +215,6 @@ void Run(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarget
     state.blendConstants = {};
     if (mesh) {
         Require(DeclaresLayer(geometryResult.spirv), "the mesh program declares no Layer output");
-        VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
-        subgroup.subgroupSize = target.subgroupSize;
-        subgroup.supportedStages = VK_SHADER_STAGE_ALL;
-        subgroup.supportedOperations = 0xffu;
-        subgroup.quadOperationsInAllStages = VK_TRUE;
-        AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, false, false, false, false, false, false, false, true);
-        return;
     }
     device.Draw(state, draw, shaders);
     device.WaitIdle();
@@ -284,7 +278,23 @@ int main(int argc, char** argv) {
         Run(*device, fieldColor, false, LayerFieldPixelCode, true);
         Check(fieldVolume.Data(), fieldColor, "a pixel shader reading the render target index of its packed ancillary word", LayerFieldBands);
         if (vertexOnly) std::puts("layered volume vertex draw tests passed");
-        else if (target.mesh.has_value()) Run(*device, color, true, PixelCode, false);
+        else if (target.mesh.has_value()) {
+            const GuestVolume meshVolume((VolumeTarget(nullptr).bytes + 65535u) & ~std::size_t{65535u});
+            const auto meshColor = VolumeTarget(meshVolume.Data());
+            Run(*device, meshColor, true, PixelCode, false);
+            Check(meshVolume.Data(), meshColor, "mesh draw", WhiteBands);
+            const GuestVolume meshFieldVolume((VolumeTarget(nullptr).bytes + 65535u) & ~std::size_t{65535u});
+            const auto meshFieldColor = VolumeTarget(meshFieldVolume.Data());
+            Run(*device, meshFieldColor, true, LayerFieldPixelCode, true);
+            Check(meshFieldVolume.Data(), meshFieldColor, "a mesh draw's pixel shader reading the render target index of its packed ancillary word", LayerFieldBands);
+            // The same draw once the background link-time-optimized relink of its pipeline libraries
+            // has landed: a pipeline that reads the Layer builtin behind a mesh stage keeps its fast
+            // link (AMD's optimized relink loses the per-primitive attribute that feeds the fragment
+            // shader's Layer), so the bands come out the same.
+            AgcDriver::Graphics::WaitForOptimizedPipelines(device->Device());
+            Run(*device, meshFieldColor, true, LayerFieldPixelCode, true);
+            Check(meshFieldVolume.Data(), meshFieldColor, "a mesh draw's pixel shader reading the render target index after the optimized relink", LayerFieldBands);
+        }
         else std::puts("mesh case skipped, the device has no VK_EXT_mesh_shader");
         std::puts("layered volume draw tests passed");
         return 0;
