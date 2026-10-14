@@ -637,7 +637,7 @@ void decideImportWatch(const Context& context, HostImports& state) {
     state.watchDevice = context.device;
     state.unwatchImports = true;
     state.unwatchDmaBufImports = false;
-    if (context.hostImportAlignment != 0 && GuestMemory::WriteWatched()) std::fprintf(stderr, "[write-watch] Windows direct host imports use comparisons; separate shared aliases retain guest write tracking\n");
+    if (context.hostImportAlignment != 0 && GuestMemory::WriteWatched()) std::fprintf(stderr, "[write-watch] Windows direct host imports of section views use comparisons; private write-watched pages and separate shared aliases retain guest write tracking\n");
 #else
     const auto request = importWatchRequest();
     state.watchDevice = context.device;
@@ -979,6 +979,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     // Drivers pin imported pages, so every page must be committed and accessible.
     bool writable = true;
     bool readOnly = true;
+    bool privatePages = true;
     MEMORY_BASIC_INFORMATION refused{};
     for (std::uint64_t cursor = base; cursor < base + bytes;) {
         MEMORY_BASIC_INFORMATION info{};
@@ -990,6 +991,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         const bool pageWritable = (info.Type == MEM_PRIVATE || info.Type == MEM_IMAGE) && (protection == PAGE_READWRITE || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_WRITECOPY);
         const bool pageReadOnly = info.Type != MEM_MAPPED && (protection == PAGE_READONLY || protection == PAGE_EXECUTE_READ);
         if (!pageReadOnly) readOnly = false;
+        if (info.Type != MEM_PRIVATE) privatePages = false;
         if (info.Type != MEM_MAPPED && !pageWritable && !pageReadOnly && refused.BaseAddress == nullptr) refused = info;
         if (!pageWritable) writable = false;
         cursor = reinterpret_cast<std::uint64_t>(info.BaseAddress) + info.RegionSize;
@@ -1026,7 +1028,12 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     VkResult result = VK_SUCCESS;
     const char* step = nullptr;
 #ifdef _WIN32
-    const bool watchedHostPointer = entry.alias != nullptr || !state.unwatchImports;
+    // A direct import of private pages of a write-watched arena stays watched: the arena collects
+    // their writes with GetWriteWatch, which no import resolves (there is no write protection on
+    // them to lose), and a page the driver writes at the import is compared with its copy as on
+    // the other platforms. Only section views (which an alias import keeps watched) are tracked
+    // by protection, so a direct import of those is compared instead.
+    const bool watchedHostPointer = entry.alias != nullptr || !state.unwatchImports || (privatePages && GuestArena::GuestArenaWriteWatched_nid_postfix());
     const bool watchedDmaBuf = watchedHostPointer;
 #else
     const bool watchedHostPointer = !state.unwatchImports;
